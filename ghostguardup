@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ghostguardup — installer for GhostGuard CLI
+# Usage: curl -L https://raw.githubusercontent.com/libaice/GhostGuard/main/ghostguardup | bash
+
+REPO="libaice/GhostGuard"
+INSTALL_DIR="${GHOSTGUARD_INSTALL_DIR:-$HOME/.ghostguard/bin}"
+BASE_URL="https://github.com/${REPO}/releases/latest/download"
+
+main() {
+    echo "ghostguardup: installing ghostguard..."
+    echo ""
+
+    detect_platform
+    download_binary
+    configure_path
+    verify_install
+
+    echo ""
+    echo "ghostguard installed successfully!"
+    echo ""
+    echo "  ghostguard --help              Show usage"
+    echo "  ghostguard --verify-tx <HASH>  Verify a single tx"
+    echo "  ghostguard --rpc <URL>         Run as sidecar"
+    echo ""
+    echo "Repo: https://github.com/${REPO}"
+}
+
+detect_platform() {
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+
+    case "$OS" in
+        linux)  OS="linux" ;;
+        darwin) OS="darwin" ;;
+        msys*|mingw*|cygwin*) OS="windows" ;;
+        *)
+            echo "error: unsupported OS: $OS"
+            exit 1
+            ;;
+    esac
+
+    case "$ARCH" in
+        x86_64|amd64) ARCH="amd64" ;;
+        arm64|aarch64) ARCH="arm64" ;;
+        *)
+            echo "error: unsupported architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+
+    if [ "$OS" = "windows" ]; then
+        EXT=".exe"
+    else
+        EXT=""
+    fi
+
+    PLATFORM="${OS}-${ARCH}"
+    echo "  platform:  ${PLATFORM}"
+}
+
+download_binary() {
+    TARBALL="ghostguard-${PLATFORM}.tar.gz"
+    DOWNLOAD_URL="${BASE_URL}/${TARBALL}"
+
+    echo "  download:  ${DOWNLOAD_URL}"
+
+    mkdir -p "$INSTALL_DIR"
+
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR"' EXIT
+
+    # Try curl first, fall back to wget
+    if command -v curl &>/dev/null; then
+        HTTP_CODE=$(curl -sL -o "$TMPDIR/$TARBALL" -w "%{http_code}" "$DOWNLOAD_URL" 2>/dev/null) || true
+    elif command -v wget &>/dev/null; then
+        wget -q -O "$TMPDIR/$TARBALL" "$DOWNLOAD_URL" 2>/dev/null && HTTP_CODE="200" || HTTP_CODE="404"
+    else
+        echo "error: curl or wget required"
+        exit 1
+    fi
+
+    if [ "$HTTP_CODE" != "200" ]; then
+        echo ""
+        echo "error: no prebuilt binary for ${PLATFORM}"
+        echo ""
+        echo "Build from source instead:"
+        echo "  cargo install --git https://github.com/${REPO}"
+        echo ""
+        echo "Or clone and build:"
+        echo "  git clone https://github.com/${REPO}"
+        echo "  cd GhostGuard && cargo install --path ."
+        exit 1
+    fi
+
+    tar -xzf "$TMPDIR/$TARBALL" -C "$INSTALL_DIR"
+    chmod +x "$INSTALL_DIR/ghostguard${EXT}"
+
+    echo "  installed: ${INSTALL_DIR}/ghostguard${EXT}"
+}
+
+configure_path() {
+    # Check if INSTALL_DIR is already in PATH
+    case ":$PATH:" in
+        *":$INSTALL_DIR:"*) return ;;
+    esac
+
+    echo ""
+    echo "  Adding $INSTALL_DIR to PATH..."
+
+    # Detect shell and config file
+    SHELL_NAME=$(basename "$SHELL")
+    case "$SHELL_NAME" in
+        zsh)  PROFILE="$HOME/.zshrc" ;;
+        bash)
+            if [ -f "$HOME/.bash_profile" ]; then
+                PROFILE="$HOME/.bash_profile"
+            else
+                PROFILE="$HOME/.bashrc"
+            fi
+            ;;
+        fish) PROFILE="$HOME/.config/fish/config.fish" ;;
+        *)    PROFILE="$HOME/.profile" ;;
+    esac
+
+    PATH_EXPORT="export PATH=\"\$HOME/.ghostguard/bin:\$PATH\""
+
+    if [ "$SHELL_NAME" = "fish" ]; then
+        PATH_EXPORT="fish_add_path $HOME/.ghostguard/bin"
+    fi
+
+    # Only add if not already present
+    if ! grep -q ".ghostguard/bin" "$PROFILE" 2>/dev/null; then
+        echo "" >> "$PROFILE"
+        echo "# GhostGuard" >> "$PROFILE"
+        echo "$PATH_EXPORT" >> "$PROFILE"
+        echo "  updated:   ${PROFILE}"
+    fi
+
+    export PATH="$INSTALL_DIR:$PATH"
+}
+
+verify_install() {
+    if command -v ghostguard &>/dev/null; then
+        VERSION=$(ghostguard --version 2>/dev/null || echo "unknown")
+        echo "  version:   ${VERSION}"
+    elif [ -x "$INSTALL_DIR/ghostguard${EXT}" ]; then
+        VERSION=$("$INSTALL_DIR/ghostguard${EXT}" --version 2>/dev/null || echo "unknown")
+        echo "  version:   ${VERSION}"
+        echo ""
+        echo "  NOTE: restart your shell or run:"
+        echo "    source ${PROFILE}"
+    fi
+}
+
+main "$@"

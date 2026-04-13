@@ -27,12 +27,49 @@ Three known attack variants all produce the same on-chain result (status=0):
 
 GhostGuard detects the **result**, not the method.
 
+## Installation
+
+### One-liner (recommended)
+
+```bash
+curl -L https://raw.githubusercontent.com/libaice/GhostGuard/main/ghostguardup | bash
+```
+
+This downloads the prebuilt binary for your platform to `~/.ghostguard/bin` and adds it to your PATH. Works on macOS (Intel/Apple Silicon) and Linux (x86_64/ARM64).
+
+### From source (cargo)
+
+```bash
+cargo install --git https://github.com/libaice/GhostGuard
+```
+
+### From source (clone + make)
+
+```bash
+git clone https://github.com/libaice/GhostGuard
+cd GhostGuard
+make install
+```
+
+### As a Rust dependency
+
+```toml
+[dependencies]
+ghostguard = { git = "https://github.com/libaice/GhostGuard" }
+```
+
+### Verify installation
+
+```bash
+ghostguard --version
+```
+
 ## Quick start
 
 ### Verify a single transaction
 
 ```bash
-cargo run --release -- \
+ghostguard \
   --verify-tx 0x9e3230abde0f569da87511a6f8823076f7b211bb00d10689db3b7c50d6652df0
 ```
 

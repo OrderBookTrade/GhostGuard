@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Detect ghost fills on Polymarket CLOB"
 license = "MIT"
+repository = "https://github.com/libaice/GhostGuard"
+homepage = "https://github.com/libaice/GhostGuard"
+keywords = ["polymarket", "ghost-fill", "clob", "polygon", "trading"]
+categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+readme = "README.md"
 
 [lib]
 name = "ghostguard"
