@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ghostguardup — installer for GhostGuard CLI
-# Usage: curl -L https://raw.githubusercontent.com/libaice/GhostGuard/main/ghostguardup | bash
+# Usage: curl -L https://raw.githubusercontent.com/OrderBookTrade/GhostGuard/main/ghostguardup | bash
 
-REPO="libaice/GhostGuard"
+REPO="OrderBookTrade/GhostGuard"
 INSTALL_DIR="${GHOSTGUARD_INSTALL_DIR:-$HOME/.ghostguard/bin}"
 BASE_URL="https://github.com/${REPO}/releases/latest/download"
 

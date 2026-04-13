@@ -176,7 +176,7 @@ The only invariant across all variants: **the on-chain settlement transaction re
 
 ## Part 4: GhostGuard
 
-I built [GhostGuard](https://github.com/OrderBookTrade/ghostguard) to detect ghost fills by verifying every CLOB fill on-chain. It doesn't care how the attack happened. It checks whether the fill actually settled.
+I built [GhostGuard](https://github.com/OrderBookTrade/GhostGuard) to detect ghost fills by verifying every CLOB fill on-chain. It doesn't care how the attack happened. It checks whether the fill actually settled.
 
 ### Core logic
 
@@ -407,7 +407,7 @@ v1 solves the critical problem: knowing that a ghost happened, in time to react.
 
 ## Links
 
-- **GhostGuard**: [github.com/OrderBookTrade/ghostguard](https://github.com/OrderBookTrade/ghostguard)
+- **GhostGuard**: [github.com/OrderBookTrade/GhostGuard](https://github.com/OrderBookTrade/GhostGuard)
 - **Known ghost fill tx**: [0x9e3230ab...on Polygonscan](https://polygonscan.com/tx/0x9e3230abde0f569da87511a6f8823076f7b211bb00d10689db3b7c50d6652df0)
 - **CTF Exchange contract**: [0x4bfb41d5...on Polygonscan](https://polygonscan.com/address/0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e)
 
