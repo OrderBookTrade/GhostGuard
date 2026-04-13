@@ -66,7 +66,7 @@ pub async fn listen_clob_fills(
                     "markets": [],
                 });
                 if let Err(e) = write
-                    .send(Message::Text(subscribe_msg.to_string().into()))
+                    .send(Message::Text(subscribe_msg.to_string()))
                     .await
                 {
                     error!(error = %e, "failed to send subscribe message");
@@ -124,9 +124,8 @@ fn parse_fill_message(text: &str) -> Option<ClobFill> {
 
     let tx_hash: H256 = tx_hash_str
         .parse()
-        .map_err(|e| {
+        .inspect_err(|e| {
             warn!(tx_hash = tx_hash_str, error = %e, "invalid tx hash in fill");
-            e
         })
         .ok()?;
 

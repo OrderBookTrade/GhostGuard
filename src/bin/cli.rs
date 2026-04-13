@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
         verify_timeout: Duration::from_secs(args.timeout),
         poll_interval: Duration::from_millis(args.poll_ms),
         webhook_url: args.webhook.clone(),
+        ..Default::default()
     };
 
     // Single tx verification mode
