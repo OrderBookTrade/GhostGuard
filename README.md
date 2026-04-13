@@ -32,7 +32,7 @@ GhostGuard detects the **result**, not the method.
 ### One-liner (recommended)
 
 ```bash
-curl -L https://raw.githubusercontent.com/libaice/GhostGuard/main/ghostguardup | bash
+curl -L https://raw.githubusercontent.com/orderbooktrade/GhostGuard/main/ghostguardup | bash
 ```
 
 This downloads the prebuilt binary for your platform to `~/.ghostguard/bin` and adds it to your PATH. Works on macOS (Intel/Apple Silicon) and Linux (x86_64/ARM64).
@@ -40,13 +40,13 @@ This downloads the prebuilt binary for your platform to `~/.ghostguard/bin` and 
 ### From source (cargo)
 
 ```bash
-cargo install --git https://github.com/libaice/GhostGuard
+cargo install --git https://github.com/OrderBookTrade/GhostGuard
 ```
 
 ### From source (clone + make)
 
 ```bash
-git clone https://github.com/libaice/GhostGuard
+git clone https://github.com/OrderBookTrade/GhostGuard
 cd GhostGuard
 make install
 ```
@@ -55,7 +55,7 @@ make install
 
 ```toml
 [dependencies]
-ghostguard = { git = "https://github.com/libaice/GhostGuard" }
+ghostguard = { git = "https://github.com/OrderBookTrade/GhostGuard" }
 ```
 
 ### Verify installation
