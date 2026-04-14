@@ -30,6 +30,9 @@ use crate::ws::ClobFill;
 /// Events accepted by the TUI render loop.
 #[derive(Debug, Clone)]
 pub enum TuiEvent {
+    /// A trade arrived on the CLOB stream (before any verification).
+    /// Emitted for every fill so the feed reflects live activity.
+    Trade(ClobFill),
     /// A verdict came back from on-chain verification.
     Verdict {
         verdict: FillVerdict,
@@ -84,6 +87,7 @@ impl ConnectionStatus {
 /// Kind of entry in the scrolling live feed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedKind {
+    Trade,
     Real,
     Ghost,
     Warn,
@@ -94,6 +98,7 @@ pub enum FeedKind {
 impl FeedKind {
     fn tag(&self) -> &'static str {
         match self {
+            FeedKind::Trade => "[TRADE]",
             FeedKind::Real => "[REAL]",
             FeedKind::Ghost => "[GHOST]",
             FeedKind::Warn => "[WARN]",
@@ -104,6 +109,7 @@ impl FeedKind {
 
     fn style(&self) -> Style {
         match self {
+            FeedKind::Trade => Style::default().fg(Color::Blue),
             FeedKind::Real => Style::default().fg(Color::Green),
             FeedKind::Ghost => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             FeedKind::Warn => Style::default().fg(Color::Yellow),
@@ -249,6 +255,7 @@ impl TuiState {
             return;
         }
         match ev {
+            TuiEvent::Trade(fill) => self.on_trade(fill),
             TuiEvent::Verdict {
                 verdict,
                 fill,
@@ -281,6 +288,30 @@ impl TuiState {
         }
     }
 
+    /// Called for every incoming trade (before any verification).
+    /// Updates the market row's rolling stats and emits a [TRADE] feed entry.
+    fn on_trade(&mut self, fill: ClobFill) {
+        let now = Instant::now();
+        let row = self.market_mut(&fill.market);
+        row.record_fill(fill.size, now);
+
+        let detail = format!(
+            "side={} size={:.2} price={:.4}",
+            fill.side, fill.size, fill.price
+        );
+        self.push_feed(FeedEntry {
+            time: Utc::now(),
+            kind: FeedKind::Trade,
+            tx_short: if fill.tx_hash.is_zero() {
+                String::new()
+            } else {
+                short_hex(&format!("{:?}", fill.tx_hash))
+            },
+            market: fill.market,
+            detail,
+        });
+    }
+
     fn on_verdict(&mut self, verdict: FillVerdict, fill: ClobFill, latency_ms: u64) {
         self.stats.total_verified += 1;
         self.stats.latency_sum_ms += latency_ms as u128;
@@ -290,9 +321,8 @@ impl TuiState {
                 self.stats.latency_sum_ms as f64 / self.stats.latency_samples as f64;
         }
 
-        let now = Instant::now();
-        let row = self.market_mut(&fill.market);
-        row.record_fill(fill.size, now);
+        // Note: fill size / rolling window is already tracked by `on_trade`;
+        // don't double-count here.
 
         let (kind, detail) = match &verdict {
             FillVerdict::Real { block, .. } => (FeedKind::Real, format!("block={block}")),
