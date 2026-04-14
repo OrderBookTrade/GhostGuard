@@ -17,6 +17,24 @@ pub struct Config {
     pub webhook_url: Option<String>,
     /// List of market IDs to monitor. If empty, subscribes to user channel.
     pub markets: Vec<String>,
+
+    // ---- Phase 2: predictive detection ----
+    /// Enable predictive ghost fill scoring.
+    pub predictive_enabled: bool,
+    /// Risk threshold above which a warning is emitted.
+    pub predictive_threshold: f64,
+    /// Rolling window size for per-market average trade size.
+    pub avg_window: usize,
+
+    // ---- Phase 1 refinements: logging ----
+    /// Path to JSONL verdict log. Empty = disabled.
+    pub verdict_log: String,
+    /// Path to JSONL predictive warning log. Empty = disabled.
+    pub predictive_log: String,
+
+    // ---- UI ----
+    /// Launch the ratatui dashboard instead of plain stdout output.
+    pub tui_mode: bool,
 }
 
 impl Default for Config {
@@ -28,6 +46,12 @@ impl Default for Config {
             poll_interval: Duration::from_millis(500),
             webhook_url: None,
             markets: vec![],
+            predictive_enabled: false,
+            predictive_threshold: 0.7,
+            avg_window: 50,
+            verdict_log: "data/verdicts.jsonl".into(),
+            predictive_log: "data/predictive_warnings.jsonl".into(),
+            tui_mode: false,
         }
     }
 }
@@ -76,6 +100,24 @@ pub struct GhostFillEvent {
     pub counterparty: Option<Address>,
     pub reason: String,
     pub timestamp: u64,
+}
+
+/// Predictive warning emitted BEFORE chain confirmation.
+///
+/// Produced by `predictive::Predictor::score_fill()` when the computed
+/// risk score exceeds `Config::predictive_threshold`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictiveWarning {
+    pub tx_hash: H256,
+    pub market: String,
+    pub score: f64,
+    pub price_deviation: f64,
+    pub size_anomaly: f64,
+    pub trade_price: f64,
+    pub mid_price: f64,
+    pub trade_size: f64,
+    pub avg_size: f64,
+    pub ts: u64,
 }
 
 /// Known Polymarket contract addresses on Polygon.
