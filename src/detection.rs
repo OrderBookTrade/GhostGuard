@@ -75,11 +75,19 @@ pub async fn verify_fill(rpc_url: &str, tx_hash: H256, config: &Config) -> Resul
                     return Ok(FillVerdict::Real { tx_hash, block });
                 }
 
-                // status == 0: transaction reverted — ghost fill
-                let reason = extract_revert_reason(&provider, tx_hash, &receipt).await;
-                let counterparty = extract_counterparty(&receipt);
+                // status == 0: transaction reverted — ghost fill. Fetch tx
+                // once and derive both the revert reason and the actual
+                // counterparty (decoded from calldata, NOT the exchange
+                // contract address in receipt.to).
+                let tx = provider.get_transaction(tx_hash).await.ok().flatten();
+                let reason = extract_revert_reason(&provider, &receipt, tx.as_ref()).await;
+                let counterparty = extract_counterparty_from_calldata(tx.as_ref());
 
-                warn!(?tx_hash, %reason, "fill reverted — GHOST");
+                if let Some(cp) = counterparty {
+                    warn!(?tx_hash, %reason, ?cp, "fill reverted — GHOST");
+                } else {
+                    warn!(?tx_hash, %reason, "fill reverted — GHOST (no counterparty decoded)");
+                }
                 return Ok(FillVerdict::Ghost {
                     tx_hash,
                     reason,
@@ -121,13 +129,12 @@ pub async fn verify_fill(rpc_url: &str, tx_hash: H256, config: &Config) -> Resul
 /// 3. Fall back to "unknown revert".
 async fn extract_revert_reason(
     provider: &Provider<Http>,
-    tx_hash: H256,
     receipt: &ethers::types::TransactionReceipt,
+    tx: Option<&ethers::types::Transaction>,
 ) -> String {
-    // Try to get the original transaction to replay it
-    let tx = match provider.get_transaction(tx_hash).await {
-        Ok(Some(tx)) => tx,
-        _ => return "unknown revert (tx not found)".into(),
+    let tx = match tx {
+        Some(tx) => tx,
+        None => return "unknown revert (tx not found)".into(),
     };
 
     // Replay the transaction via eth_call at the block it was included in
@@ -180,13 +187,69 @@ async fn extract_revert_reason(
     }
 }
 
-/// Extract counterparty address from the transaction's `to` field or input data.
-fn extract_counterparty(receipt: &ethers::types::TransactionReceipt) -> Option<Address> {
-    // The `from` in the receipt is the sender (settlement bot).
-    // For CTF exchange calls, the counterparty is encoded in calldata,
-    // but as a first pass we return the `to` address (the exchange contract).
-    // In v2 we can decode the actual taker/maker from calldata.
-    receipt.to
+/// Addresses we should EXCLUDE when scanning calldata for counterparties —
+/// these are Polymarket infrastructure, not actual traders.
+fn is_known_contract(addr: Address) -> bool {
+    // Parse once at compile time would need const-fn, so do it lazily.
+    // Comparison is cheap (20-byte memcmp).
+    const KNOWN: &[&str] = &[
+        // Polymarket CTF Exchange
+        "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+        // Polymarket NegRisk CTF Exchange
+        "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+        // Polymarket Fee Module (operator)
+        "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+        // USDC.e on Polygon
+        "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        // Conditional Tokens Framework (ERC1155)
+        "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+        // Known Polymarket relayers/operators
+        "0x0E92bA4A56f24C4371E4d097adfB6D2d3F0a0c6e",
+    ];
+    KNOWN
+        .iter()
+        .any(|k| k.parse::<Address>().map(|a| a == addr).unwrap_or(false))
+}
+
+/// Extract the actual counterparty (maker/taker) from the transaction calldata.
+///
+/// For Polymarket `matchOrders` / `fillOrder` / `fillOrders`, the real user
+/// addresses are encoded inside `Order` tuples in the calldata, NOT in
+/// `receipt.to` (which is always the exchange contract).
+///
+/// Strategy: scan the calldata body for every 32-byte slot that looks like
+/// an address-encoded value (12 zero bytes + 20 non-zero bytes). Filter out
+/// known Polymarket contract addresses. Return the first remaining address —
+/// this is typically the maker of the order that failed to settle, which is
+/// the wallet that drained its balance (the attacker) in the common case.
+fn extract_counterparty_from_calldata(tx: Option<&ethers::types::Transaction>) -> Option<Address> {
+    let tx = tx?;
+    let input = tx.input.as_ref();
+    // Skip the 4-byte function selector.
+    if input.len() <= 4 {
+        return None;
+    }
+    let body = &input[4..];
+
+    for chunk in body.chunks_exact(32) {
+        // ABI-encoded `address` = 12 zero bytes + 20 address bytes.
+        if chunk[..12].iter().any(|&b| b != 0) {
+            continue;
+        }
+        let addr = Address::from_slice(&chunk[12..32]);
+        if addr.is_zero() {
+            continue;
+        }
+        if is_known_contract(addr) {
+            continue;
+        }
+        // Also skip the relayer that submitted the tx.
+        if addr == tx.from {
+            continue;
+        }
+        return Some(addr);
+    }
+    None
 }
 
 /// Try to parse Solidity's `Error(string)` from an error message.

@@ -324,19 +324,23 @@ impl TuiState {
         // Note: fill size / rolling window is already tracked by `on_trade`;
         // don't double-count here.
 
+        // For ghosts, render the FULL tx hash into the detail string so the
+        // user can copy it straight to Polygonscan without digging into the
+        // JSONL log.
+        let tx_full = format!("{:?}", verdict.tx_hash());
         let (kind, detail) = match &verdict {
             FillVerdict::Real { block, .. } => (FeedKind::Real, format!("block={block}")),
             FillVerdict::Ghost { reason, .. } => {
                 self.stats.total_ghost += 1;
                 let row = self.market_mut(&fill.market);
                 row.ghost_count += 1;
-                (FeedKind::Ghost, format!("reason={reason}"))
+                (FeedKind::Ghost, format!("tx={tx_full} reason={reason}"))
             }
             FillVerdict::Timeout { .. } => {
                 self.stats.total_ghost += 1;
                 let row = self.market_mut(&fill.market);
                 row.ghost_count += 1;
-                (FeedKind::Ghost, "reason=timeout".into())
+                (FeedKind::Ghost, format!("tx={tx_full} reason=timeout"))
             }
         };
 
