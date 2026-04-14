@@ -65,6 +65,12 @@ pub enum TuiEvent {
         slug: String,
         assets_ids: Vec<String>,
         question: String,
+        /// Outcome labels in the same order as `assets_ids`, e.g. `["Up","Down"]`.
+        /// Empty when the source event didn't include outcomes.
+        outcomes: Vec<String>,
+        /// Short time-window label derived from the event title, e.g.
+        /// `"7:05AM-7:10AM ET"`. Empty when unavailable.
+        time_window: String,
     },
     /// A market has been resolved — mark it [RESOLVED] and prune later.
     MarketResolved {
@@ -170,6 +176,9 @@ impl DashboardStats {
 #[derive(Debug, Clone, Default)]
 pub struct MarketRow {
     pub slug: String,
+    /// Human-readable cycle label, e.g. `"UP 7:05AM-7:10AM ET"`.
+    /// Populated from NewMarket events; None until we know the cycle.
+    pub label: Option<String>,
     pub mid_price: Option<f64>,
     pub total_size: f64,
     pub size_samples: u64,
@@ -279,10 +288,20 @@ impl TuiState {
         self.feed.push_back(entry);
     }
 
-    fn market_mut(&mut self, slug: &str) -> &mut MarketRow {
+    /// Explicitly register a market row — only callable from Config /
+    /// NewMarket paths. Inserts if missing, returns a mutable handle.
+    fn track_market(&mut self, slug: &str) -> &mut MarketRow {
         self.markets
             .entry(slug.to_string())
             .or_insert_with(|| MarketRow::new(slug.to_string()))
+    }
+
+    /// Return a mutable handle ONLY if the market is already tracked.
+    /// Used by PriceUpdate / Trade / Verdict handlers so late ws events
+    /// for tokens we've unsubscribed from (or never subscribed to)
+    /// don't resurrect phantom rows in the Markets panel.
+    fn market_if_tracked(&mut self, slug: &str) -> Option<&mut MarketRow> {
+        self.markets.get_mut(slug)
     }
 
     /// Apply an incoming event to state.
@@ -331,6 +350,8 @@ impl TuiState {
                 slug,
                 assets_ids,
                 question,
+                outcomes,
+                time_window,
             } => {
                 self.last_new_market_at = Some(Instant::now());
                 self.current_cycle = Some(CycleInfo {
@@ -339,11 +360,23 @@ impl TuiState {
                     assets_ids: assets_ids.clone(),
                     started_at: Instant::now(),
                 });
-                // Add new markets to the panel
-                for aid in &assets_ids {
-                    self.markets
+                // Add new markets to the panel, attaching the per-token label
+                // (outcome + time window) so the user can tell UP from DOWN.
+                for (i, aid) in assets_ids.iter().enumerate() {
+                    let label = outcomes.get(i).map(|outcome| {
+                        if time_window.is_empty() {
+                            outcome.to_uppercase()
+                        } else {
+                            format!("{} {}", outcome.to_uppercase(), time_window)
+                        }
+                    });
+                    let row = self
+                        .markets
                         .entry(aid.clone())
                         .or_insert_with(|| MarketRow::new(aid.clone()));
+                    if label.is_some() {
+                        row.label = label;
+                    }
                 }
                 // Make sure the markets list reflects the new subscription
                 self.markets_list.retain(|m| !m.is_empty());
@@ -811,6 +844,7 @@ fn render_markets(f: &mut Frame, area: Rect, state: &TuiState) {
 
     let header = Row::new(vec![
         Cell::from("market"),
+        Cell::from("cycle"),
         Cell::from("mid"),
         Cell::from("avg size"),
         Cell::from("fills/min"),
@@ -819,29 +853,39 @@ fn render_markets(f: &mut Frame, area: Rect, state: &TuiState) {
     .style(Style::default().add_modifier(Modifier::BOLD));
 
     let mut rows: Vec<&MarketRow> = state.markets.values().collect();
-    rows.sort_by(|a, b| a.slug.cmp(&b.slug));
+    // Sort by label first so UP / DOWN of the same cycle sit next to each
+    // other, then by slug as tiebreaker for deterministic order.
+    rows.sort_by(|a, b| {
+        a.label
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.label.as_deref().unwrap_or(""))
+            .then_with(|| a.slug.cmp(&b.slug))
+    });
 
     let body: Vec<Row> = rows
         .iter()
         .map(|m| {
             let ghost = m.ghost_rate();
             let resolved = state.resolved_at.contains_key(&m.slug);
-            let base_slug = if m.slug.len() > 18 {
-                format!("{}..", &m.slug[..16])
+            let base_slug = if m.slug.len() > 14 {
+                format!("{}..", &m.slug[..12])
             } else {
                 m.slug.clone()
             };
-            let slug = if resolved {
+            let slug_cell = if resolved {
                 format!("{base_slug} [RESOLVED]")
             } else {
                 base_slug
             };
+            let cycle_label = m.label.clone().unwrap_or_else(|| "-".into());
             let mid = m
                 .mid_price
                 .map(|p| format!("{p:.4}"))
                 .unwrap_or_else(|| "-".into());
             let mut row = Row::new(vec![
-                Cell::from(slug),
+                Cell::from(slug_cell),
+                Cell::from(cycle_label),
                 Cell::from(mid),
                 Cell::from(format!("{:.2}", m.avg_size())),
                 Cell::from(format!("{}", m.fills_per_min())),
@@ -857,11 +901,12 @@ fn render_markets(f: &mut Frame, area: Rect, state: &TuiState) {
         .collect();
 
     let widths = [
-        Constraint::Percentage(40),
-        Constraint::Percentage(15),
-        Constraint::Percentage(15),
-        Constraint::Percentage(15),
-        Constraint::Percentage(15),
+        Constraint::Percentage(18),
+        Constraint::Percentage(32),
+        Constraint::Percentage(10),
+        Constraint::Percentage(14),
+        Constraint::Percentage(13),
+        Constraint::Percentage(13),
     ];
     let table = Table::new(body, widths).header(header);
     f.render_widget(table, inner);

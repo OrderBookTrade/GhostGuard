@@ -34,10 +34,28 @@ pub struct CurrentCycle {
     /// Underlying market condition ID (0x...).
     pub condition_id: String,
     pub question: String,
+    /// Human-readable event title, e.g.
+    /// `"Bitcoin Up or Down - April 14, 7:05AM-7:10AM ET"`.
+    pub title: String,
+    /// Outcome labels in the same order as `assets_ids` (e.g. `["Up", "Down"]`
+    /// or `["Yes", "No"]`).
+    pub outcomes: Vec<String>,
     /// CLOB token IDs (YES + NO).
     pub assets_ids: Vec<String>,
     pub start_time: DateTime<Utc>,
     pub end_date: DateTime<Utc>,
+}
+
+impl CurrentCycle {
+    /// Extract the time-window substring from the title, e.g.
+    /// `"7:05AM-7:10AM ET"` from `"Bitcoin Up or Down - April 14, 7:05AM-7:10AM ET"`.
+    /// Falls back to an empty string when the title has no `, ` separator.
+    pub fn time_window(&self) -> String {
+        self.title
+            .rsplit_once(", ")
+            .map(|(_, rhs)| rhs.trim().to_string())
+            .unwrap_or_default()
+    }
 }
 
 const GAMMA_BASE: &str = "https://gamma-api.polymarket.com";
@@ -156,6 +174,13 @@ fn parse_event_to_cycle(ev: &serde_json::Value) -> Option<CurrentCycle> {
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .to_string();
+    // Title lives at the top level of the event (not inside markets[0]).
+    // Fall back to question when missing.
+    let title = ev
+        .get("title")
+        .and_then(|s| s.as_str())
+        .unwrap_or(&question)
+        .to_string();
 
     // clobTokenIds comes as a JSON-encoded STRING holding the array.
     let raw = first
@@ -167,10 +192,19 @@ fn parse_event_to_cycle(ev: &serde_json::Value) -> Option<CurrentCycle> {
         return None;
     }
 
+    // Outcomes are also a JSON-encoded STRING (e.g. "[\"Up\",\"Down\"]").
+    let outcomes_raw = first
+        .get("outcomes")
+        .and_then(|s| s.as_str())
+        .unwrap_or("[]");
+    let outcomes: Vec<String> = serde_json::from_str(outcomes_raw).unwrap_or_default();
+
     Some(CurrentCycle {
         slug,
         condition_id,
         question,
+        title,
+        outcomes,
         assets_ids,
         start_time,
         end_date,
@@ -203,18 +237,37 @@ mod tests {
     fn test_parse_event_to_cycle() {
         let ev = serde_json::json!({
             "slug": "btc-updown-5m-1776164100",
-            "startTime": "2026-04-14T10:55:00Z",
-            "endDate": "2026-04-14T11:00:00Z",
+            "title": "Bitcoin Up or Down - April 14, 7:05AM-7:10AM ET",
+            "startTime": "2026-04-14T11:05:00Z",
+            "endDate": "2026-04-14T11:10:00Z",
             "markets": [{
                 "conditionId": "0xabc",
-                "question": "Bitcoin Up or Down - 10:55AM-11:00AM ET",
-                "clobTokenIds": "[\"111\",\"222\"]"
+                "question": "Bitcoin Up or Down - April 14, 7:05AM-7:10AM ET",
+                "clobTokenIds": "[\"111\",\"222\"]",
+                "outcomes": "[\"Up\",\"Down\"]"
             }]
         });
         let cycle = parse_event_to_cycle(&ev).expect("should parse");
         assert_eq!(cycle.slug, "btc-updown-5m-1776164100");
         assert_eq!(cycle.condition_id, "0xabc");
         assert_eq!(cycle.assets_ids, vec!["111".to_string(), "222".to_string()]);
+        assert_eq!(cycle.outcomes, vec!["Up".to_string(), "Down".to_string()]);
+        assert_eq!(cycle.time_window(), "7:05AM-7:10AM ET");
+    }
+
+    #[test]
+    fn test_time_window_fallback() {
+        let c = CurrentCycle {
+            slug: String::new(),
+            condition_id: String::new(),
+            question: String::new(),
+            title: "NoCommaHere".into(),
+            outcomes: vec![],
+            assets_ids: vec![],
+            start_time: Utc::now(),
+            end_date: Utc::now(),
+        };
+        assert_eq!(c.time_window(), "");
     }
 
     #[test]

@@ -313,11 +313,16 @@ async fn run_event_loop(
                     }
                 }
                 if let Some(ref tx) = tui_tx {
+                    // The WS `new_market` event doesn't carry outcomes or a
+                    // title time window. The Gamma poller will emit a richer
+                    // NewMarket shortly after with label info and overwrite.
                     let _ = tx.send(TuiEvent::NewMarket {
                         market,
                         slug,
                         assets_ids,
                         question,
+                        outcomes: Vec::new(),
+                        time_window: String::new(),
                     });
                 }
             }
@@ -424,13 +429,17 @@ async fn run_rotation_poller(
             let _ = cmd_tx.send(ws::WsCommand::Subscribe(to_sub)).await;
         }
 
-        // Tell the TUI about the new cycle.
+        // Tell the TUI about the new cycle — this path carries the full
+        // outcome + time-window info so the Markets panel can label each
+        // token (e.g. "UP 7:05AM-7:10AM ET").
         if let Some(ref tx) = tui_tx {
             let _ = tx.send(TuiEvent::NewMarket {
                 market: cycle.condition_id.clone(),
                 slug: cycle.slug.clone(),
                 assets_ids: cycle.assets_ids.clone(),
                 question: cycle.question.clone(),
+                outcomes: cycle.outcomes.clone(),
+                time_window: cycle.time_window(),
             });
         }
 
