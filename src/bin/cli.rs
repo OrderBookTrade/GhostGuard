@@ -33,6 +33,22 @@ struct Args {
     /// Verify a single tx hash and exit (for testing)
     #[arg(long)]
     verify_tx: Option<String>,
+
+    /// Enable predictive ghost fill scoring
+    #[arg(long)]
+    predictive: bool,
+
+    /// Risk threshold for predictive warnings (0.0-1.0)
+    #[arg(long, default_value = "0.7")]
+    risk_threshold: f64,
+
+    /// Enable wallet history lookups for predictive scoring
+    #[arg(long)]
+    wallet_lookup: bool,
+
+    /// Rolling window size for market statistics
+    #[arg(long, default_value = "100")]
+    stats_window: usize,
 }
 
 #[tokio::main]
@@ -51,6 +67,10 @@ async fn main() -> Result<()> {
         verify_timeout: Duration::from_secs(args.timeout),
         poll_interval: Duration::from_millis(args.poll_ms),
         webhook_url: args.webhook.clone(),
+        predictive_enabled: args.predictive,
+        risk_threshold: args.risk_threshold,
+        wallet_lookup_enabled: args.wallet_lookup,
+        stats_window_size: args.stats_window,
         ..Default::default()
     };
 
@@ -85,12 +105,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Sidecar mode: listen to CLOB websocket and verify fills
+    // Sidecar mode
     println!("Starting GhostGuard sidecar...");
-    println!("  RPC:     {}", args.rpc);
-    println!("  CLOB WS: {}", args.clob_ws);
+    println!("  RPC:        {}", args.rpc);
+    println!("  CLOB WS:    {}", args.clob_ws);
     if let Some(ref wh) = args.webhook {
-        println!("  Webhook: {wh}");
+        println!("  Webhook:    {wh}");
+    }
+    if args.predictive {
+        println!("  Predictive: ENABLED (threshold={:.2})", args.risk_threshold);
+        if args.wallet_lookup {
+            println!("  Wallet:     lookup enabled");
+        }
     }
     println!();
 
@@ -110,6 +136,15 @@ async fn main() -> Result<()> {
         if let Some(cp) = event.counterparty {
             println!("        counterparty={cp:?}");
         }
+    });
+
+    guard.on_high_risk(|risk| {
+        println!(
+            "[HIGH RISK {:.2}] tx={:?} market={} price_dev={:.2} size_anom={:.2} wallet={:?}",
+            risk.score, risk.tx_hash, risk.market,
+            risk.factors.price_deviation, risk.factors.size_anomaly,
+            risk.factors.wallet_risk,
+        );
     });
 
     guard.start().await?;

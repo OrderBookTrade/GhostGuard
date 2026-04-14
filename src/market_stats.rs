@@ -13,10 +13,6 @@ pub struct MarketSnapshot {
     window_size: usize,
     /// Running sum for incremental mean.
     running_sum: f64,
-    /// Running sum of squared deviations (Welford's).
-    running_m2: f64,
-    /// Count of values seen (may exceed window_size; tracks total inserts).
-    count: usize,
 }
 
 impl MarketSnapshot {
@@ -26,8 +22,6 @@ impl MarketSnapshot {
             fill_sizes: VecDeque::with_capacity(window_size),
             window_size,
             running_sum: 0.0,
-            running_m2: 0.0,
-            count: 0,
         }
     }
 
@@ -48,7 +42,6 @@ impl MarketSnapshot {
         }
         self.fill_sizes.push_back(size);
         self.running_sum += size;
-        self.count += 1;
     }
 
     /// Number of fills in the rolling window.
