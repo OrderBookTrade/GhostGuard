@@ -1,10 +1,28 @@
 use anyhow::{Context, Result};
 use ethers::providers::{Http, Middleware, Provider, RawCall};
 use ethers::types::{Address, H256};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::types::{Config, FillVerdict, TRANSFER_FROM_FAILED_SELECTOR};
+use crate::callback;
+use crate::logging::JsonlWriter;
+use crate::types::{Config, FillVerdict, GhostFillEvent, TRANSFER_FROM_FAILED_SELECTOR};
+use crate::ws::ClobFill;
+
+/// Callbacks dispatched by `handle_fill` after on-chain verification.
+pub type VerdictCallback = Arc<dyn Fn(FillVerdict) + Send + Sync>;
+pub type GhostCallback = Arc<dyn Fn(GhostFillEvent) + Send + Sync>;
+
+/// Dependencies for the detection pipeline.
+#[derive(Clone)]
+pub struct DetectionContext {
+    pub config: Arc<Config>,
+    pub verdict_log: Option<Arc<JsonlWriter>>,
+    pub on_real: Arc<Vec<VerdictCallback>>,
+    pub on_ghost: Arc<Vec<GhostCallback>>,
+}
 
 /// Verify a single fill transaction on-chain.
 ///
@@ -203,6 +221,136 @@ fn truncate(s: &str, max: usize) -> &str {
         s
     } else {
         &s[..max]
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Run the full verify → log → dispatch pipeline for a single fill.
+///
+/// This is the orchestrator that `lib.rs` spawns per `ClobEvent::Fill`.
+/// Runs `verify_fill`, appends to the verdict JSONL log (if configured),
+/// POSTs to the webhook (if configured), and fires registered callbacks.
+pub async fn handle_fill(ctx: DetectionContext, fill: ClobFill) {
+    let config = &ctx.config;
+
+    let verdict = match verify_fill(&config.rpc_url, fill.tx_hash, config).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!(tx_hash = ?fill.tx_hash, error = %e, "verification failed");
+            return;
+        }
+    };
+
+    // Webhook dispatch (verdict level)
+    if let Some(ref url) = config.webhook_url {
+        if let Err(e) = callback::send_webhook(url, &verdict).await {
+            warn!(error = %e, "webhook dispatch failed");
+        }
+    }
+
+    // JSONL audit log
+    if let Some(ref log) = ctx.verdict_log {
+        if let Err(e) = log.append(&build_verdict_log_line(&verdict, &fill)).await {
+            warn!(error = %e, "failed to append verdict log");
+        }
+    }
+
+    // Dispatch to registered callbacks
+    match &verdict {
+        FillVerdict::Real { .. } => {
+            for cb in ctx.on_real.iter() {
+                cb(verdict.clone());
+            }
+        }
+        FillVerdict::Ghost {
+            tx_hash,
+            reason,
+            counterparty,
+        } => {
+            let event = GhostFillEvent {
+                tx_hash: *tx_hash,
+                market: fill.market.clone(),
+                side: fill.side.clone(),
+                size: fill.size,
+                price: fill.price,
+                counterparty: *counterparty,
+                reason: reason.clone(),
+                timestamp: now_secs(),
+            };
+
+            if let Some(ref url) = config.webhook_url {
+                if let Err(e) = callback::send_ghost_event_webhook(url, &event).await {
+                    warn!(error = %e, "ghost event webhook failed");
+                }
+            }
+
+            for cb in ctx.on_ghost.iter() {
+                cb(event.clone());
+            }
+        }
+        FillVerdict::Timeout { tx_hash } => {
+            let event = GhostFillEvent {
+                tx_hash: *tx_hash,
+                market: fill.market.clone(),
+                side: fill.side.clone(),
+                size: fill.size,
+                price: fill.price,
+                counterparty: None,
+                reason: "timeout — no receipt".into(),
+                timestamp: now_secs(),
+            };
+
+            for cb in ctx.on_ghost.iter() {
+                cb(event.clone());
+            }
+        }
+    }
+}
+
+/// Build the JSONL audit log line for a verdict.
+fn build_verdict_log_line(verdict: &FillVerdict, fill: &ClobFill) -> serde_json::Value {
+    let ts = now_secs();
+    match verdict {
+        FillVerdict::Real { tx_hash, block } => serde_json::json!({
+            "ts": ts,
+            "kind": "verdict",
+            "verdict": "Real",
+            "tx": format!("{:?}", tx_hash),
+            "market": fill.market,
+            "block": block,
+            "size": fill.size,
+            "price": fill.price,
+        }),
+        FillVerdict::Ghost {
+            tx_hash,
+            reason,
+            counterparty,
+        } => serde_json::json!({
+            "ts": ts,
+            "kind": "verdict",
+            "verdict": "Ghost",
+            "tx": format!("{:?}", tx_hash),
+            "market": fill.market,
+            "reason": reason,
+            "counterparty": counterparty.map(|a| format!("{a:?}")),
+            "size": fill.size,
+            "price": fill.price,
+        }),
+        FillVerdict::Timeout { tx_hash } => serde_json::json!({
+            "ts": ts,
+            "kind": "verdict",
+            "verdict": "Timeout",
+            "tx": format!("{:?}", tx_hash),
+            "market": fill.market,
+            "size": fill.size,
+            "price": fill.price,
+        }),
     }
 }
 

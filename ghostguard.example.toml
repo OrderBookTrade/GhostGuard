@@ -1,0 +1,34 @@
+# GhostGuard example config. Copy to `ghostguard.toml` and pass
+# `--config ghostguard.toml` to the binary.
+#
+# All sections and fields are optional. Missing values fall back to
+# Config::default(). CLI flags override anything here.
+
+[rpc]
+url = "https://polygon-rpc.com"
+
+[clob]
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+# Comma-separated asset / market IDs to subscribe to. Empty = user channel.
+asset_ids = []
+
+[detection]
+verify_timeout_secs = 10
+poll_interval_ms = 500
+predictive_enabled = false
+predictive_threshold = 0.7
+avg_window = 50
+
+[alerts]
+# webhook_url = "http://localhost:9090/ghost-alert"
+verdict_log = "data/verdicts.jsonl"
+predictive_log = "data/predictive_warnings.jsonl"
+
+# Phase 3 — parsed but not active yet.
+[defense]
+auto_cancel = false
+auto_blacklist = true
+
+# Phase 4 — parsed but not active yet.
+[api]
+listen = "127.0.0.1:8080"
