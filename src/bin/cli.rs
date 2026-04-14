@@ -309,7 +309,7 @@ async fn bootstrap_current_market(pattern: &str) -> anyhow::Result<Option<(Strin
 
     // Ask for a healthy batch of active markets; we filter client-side so we
     // don't depend on undocumented query params being honoured.
-    let url = "https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=50&order=volume24hr&ascending=false";
+    let url = "https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=100&order=createdAt&ascending=false";
     let resp = client.get(url).send().await?.error_for_status()?;
     let markets: serde_json::Value = resp.json().await?;
 
