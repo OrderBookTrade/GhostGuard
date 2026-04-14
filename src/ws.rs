@@ -47,10 +47,7 @@ impl ClobFillData {
 /// Connect to the Polymarket CLOB WebSocket and stream fill events.
 ///
 /// Sends each extracted fill into `tx`. Reconnects on disconnect.
-pub async fn listen_clob_fills(
-    ws_url: &str,
-    tx: mpsc::Sender<ClobFill>,
-) -> Result<()> {
+pub async fn listen_clob_fills(ws_url: &str, tx: mpsc::Sender<ClobFill>) -> Result<()> {
     loop {
         info!(url = ws_url, "connecting to CLOB websocket...");
 

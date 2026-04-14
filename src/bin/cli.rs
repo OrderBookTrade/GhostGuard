@@ -15,7 +15,10 @@ struct Args {
     rpc: String,
 
     /// Polymarket CLOB WebSocket URL
-    #[arg(long, default_value = "wss://ws-subscriptions-clob.polymarket.com/ws/market")]
+    #[arg(
+        long,
+        default_value = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    )]
     clob_ws: String,
 
     /// Webhook URL to POST fill verdicts to

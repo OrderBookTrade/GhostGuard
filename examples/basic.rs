@@ -16,8 +16,7 @@ async fn main() -> Result<()> {
 
     // Known ghost fill tx — wallet drain attack, TRANSFER_FROM_FAILED
     let ghost_tx: H256 =
-        "0x9e3230abde0f569da87511a6f8823076f7b211bb00d10689db3b7c50d6652df0"
-            .parse()?;
+        "0x9e3230abde0f569da87511a6f8823076f7b211bb00d10689db3b7c50d6652df0".parse()?;
 
     println!("Verifying known ghost fill: {ghost_tx:?}\n");
 

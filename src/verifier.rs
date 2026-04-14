@@ -12,13 +12,8 @@ use crate::types::{Config, FillVerdict, TRANSFER_FROM_FAILED_SELECTOR};
 /// - receipt.status == 1 → `FillVerdict::Real`
 /// - receipt.status == 0 → `FillVerdict::Ghost` (parses revert reason)
 /// - timeout expires     → `FillVerdict::Timeout`
-pub async fn verify_fill(
-    rpc_url: &str,
-    tx_hash: H256,
-    config: &Config,
-) -> Result<FillVerdict> {
-    let provider = Provider::<Http>::try_from(rpc_url)
-        .context("failed to create RPC provider")?;
+pub async fn verify_fill(rpc_url: &str, tx_hash: H256, config: &Config) -> Result<FillVerdict> {
+    let provider = Provider::<Http>::try_from(rpc_url).context("failed to create RPC provider")?;
 
     let deadline = Instant::now() + config.verify_timeout;
 
@@ -93,7 +88,11 @@ async fn extract_revert_reason(
         },
     );
 
-    match provider.call_raw(&call_request).block(block.unwrap().into()).await {
+    match provider
+        .call_raw(&call_request)
+        .block(block.unwrap().into())
+        .await
+    {
         Err(e) => {
             let err_str = e.to_string();
 
@@ -125,9 +124,7 @@ async fn extract_revert_reason(
 }
 
 /// Extract counterparty address from the transaction's `to` field or input data.
-fn extract_counterparty(
-    receipt: &ethers::types::TransactionReceipt,
-) -> Option<Address> {
+fn extract_counterparty(receipt: &ethers::types::TransactionReceipt) -> Option<Address> {
     // The `from` in the receipt is the sender (settlement bot).
     // For CTF exchange calls, the counterparty is encoded in calldata,
     // but as a first pass we return the `to` address (the exchange contract).
@@ -142,7 +139,10 @@ fn parse_solidity_revert(err: &str) -> Option<String> {
         let hex_start = idx + 8; // skip selector
         let remaining = &err[hex_start..];
         // Extract hex chars
-        let hex: String = remaining.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        let hex: String = remaining
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
         if hex.len() >= 128 {
             // offset (32 bytes) + length (32 bytes) + string data
             let len_hex = &hex[64..128];
@@ -229,17 +229,15 @@ mod tests {
             ..Default::default()
         };
 
-        let tx_hash: H256 =
-            "0x9e3230abde0f569da87511a6f8823076f7b211bb00d10689db3b7c50d6652df0"
-                .parse()
-                .unwrap();
+        let tx_hash: H256 = "0x9e3230abde0f569da87511a6f8823076f7b211bb00d10689db3b7c50d6652df0"
+            .parse()
+            .unwrap();
 
-        let verdict = verify_fill(&config.rpc_url, tx_hash, &config).await.unwrap();
+        let verdict = verify_fill(&config.rpc_url, tx_hash, &config)
+            .await
+            .unwrap();
         println!("Verdict: {verdict:?}");
 
-        assert!(
-            verdict.is_ghost(),
-            "expected ghost fill, got: {verdict:?}"
-        );
+        assert!(verdict.is_ghost(), "expected ghost fill, got: {verdict:?}");
     }
 }

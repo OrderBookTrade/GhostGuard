@@ -34,10 +34,7 @@ impl Default for Config {
 #[serde(tag = "verdict")]
 pub enum FillVerdict {
     /// Transaction confirmed on-chain with status=1.
-    Real {
-        tx_hash: H256,
-        block: u64,
-    },
+    Real { tx_hash: H256, block: u64 },
     /// Transaction reverted on-chain (status=0). This is a ghost fill.
     Ghost {
         tx_hash: H256,
@@ -45,9 +42,7 @@ pub enum FillVerdict {
         counterparty: Option<Address>,
     },
     /// No receipt received within verify_timeout. Treat as ghost.
-    Timeout {
-        tx_hash: H256,
-    },
+    Timeout { tx_hash: H256 },
 }
 
 impl FillVerdict {
@@ -60,7 +55,10 @@ impl FillVerdict {
     }
 
     pub fn is_ghost(&self) -> bool {
-        matches!(self, FillVerdict::Ghost { .. } | FillVerdict::Timeout { .. })
+        matches!(
+            self,
+            FillVerdict::Ghost { .. } | FillVerdict::Timeout { .. }
+        )
     }
 }
 
