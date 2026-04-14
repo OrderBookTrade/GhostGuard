@@ -3,11 +3,13 @@ use ethers::providers::{Http, Middleware, Provider, RawCall};
 use ethers::types::{Address, H256};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::callback;
 use crate::logging::JsonlWriter;
+use crate::tui::TuiEvent;
 use crate::types::{Config, FillVerdict, GhostFillEvent, TRANSFER_FROM_FAILED_SELECTOR};
 use crate::ws::ClobFill;
 
@@ -22,6 +24,8 @@ pub struct DetectionContext {
     pub verdict_log: Option<Arc<JsonlWriter>>,
     pub on_real: Arc<Vec<VerdictCallback>>,
     pub on_ghost: Arc<Vec<GhostCallback>>,
+    /// When TUI mode is enabled, verdicts are forwarded here for rendering.
+    pub tui_tx: Option<mpsc::UnboundedSender<TuiEvent>>,
 }
 
 /// Verify a single fill transaction on-chain.
@@ -239,6 +243,7 @@ fn now_secs() -> u64 {
 pub async fn handle_fill(ctx: DetectionContext, fill: ClobFill) {
     let config = &ctx.config;
 
+    let started = Instant::now();
     let verdict = match verify_fill(&config.rpc_url, fill.tx_hash, config).await {
         Ok(v) => v,
         Err(e) => {
@@ -246,6 +251,16 @@ pub async fn handle_fill(ctx: DetectionContext, fill: ClobFill) {
             return;
         }
     };
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    // TUI event
+    if let Some(ref tx) = ctx.tui_tx {
+        let _ = tx.send(TuiEvent::Verdict {
+            verdict: verdict.clone(),
+            fill: fill.clone(),
+            latency_ms,
+        });
+    }
 
     // Webhook dispatch (verdict level)
     if let Some(ref url) = config.webhook_url {

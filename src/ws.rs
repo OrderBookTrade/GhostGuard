@@ -14,6 +14,10 @@ pub enum ClobEvent {
     Fill(ClobFill),
     /// A mid-price or orderbook tick for a market.
     PriceUpdate(PriceUpdate),
+    /// WebSocket successfully (re)connected.
+    Connected,
+    /// WebSocket disconnected (before reconnect attempt).
+    Disconnected,
 }
 
 /// A fill event extracted from the CLOB websocket.
@@ -131,6 +135,7 @@ pub async fn listen_clob_events(
             Ok((ws_stream, _)) => {
                 info!("CLOB websocket connected");
                 backoff_secs = 1;
+                let _ = tx.send(ClobEvent::Connected).await;
 
                 let (mut write, mut read) = ws_stream.split();
 
@@ -163,6 +168,9 @@ pub async fn listen_clob_events(
                                     ClobEvent::PriceUpdate(p) => {
                                         debug!(market = %p.market, "received price update");
                                     }
+                                    // Connected/Disconnected are synthesized by the
+                                    // listener itself, never returned by the parser.
+                                    _ => {}
                                 }
                                 if tx.send(event).await.is_err() {
                                     info!("event channel closed, shutting down ws listener");
@@ -190,6 +198,7 @@ pub async fn listen_clob_events(
             }
         }
 
+        let _ = tx.send(ClobEvent::Disconnected).await;
         warn!(backoff_secs, "reconnecting to CLOB websocket...");
         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         backoff_secs = (backoff_secs * 2).min(60);

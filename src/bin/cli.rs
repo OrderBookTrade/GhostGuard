@@ -63,17 +63,28 @@ struct Args {
     /// Path to JSONL predictive warning log. Empty string disables.
     #[arg(long)]
     predictive_log: Option<String>,
+
+    /// Launch the ratatui dashboard instead of stdout output
+    #[arg(long)]
+    tui: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let args = Args::parse();
+
+    // In TUI mode, route tracing to stderr only if the user explicitly set
+    // RUST_LOG; otherwise silence it so it doesn't corrupt the alt screen.
+    // Tracing init must happen before any async work.
+    if !args.tui || std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new(if args.tui { "off" } else { "info" })),
+            )
+            .init();
+    }
 
     // 1. Start with Config::default()
     let mut config = Config::default();
@@ -118,6 +129,9 @@ async fn main() -> Result<()> {
     if let Some(v) = args.predictive_log.clone() {
         config.predictive_log = v;
     }
+    if args.tui {
+        config.tui_mode = true;
+    }
 
     // Single tx verification mode
     if let Some(tx_str) = args.verify_tx {
@@ -151,53 +165,62 @@ async fn main() -> Result<()> {
     }
 
     // Sidecar mode
-    println!("Starting GhostGuard sidecar...");
-    println!("  RPC:        {}", config.rpc_url);
-    println!("  CLOB WS:    {}", config.clob_ws_url);
-    if !config.markets.is_empty() {
-        println!("  Markets:    {}", config.markets.join(", "));
+    let tui_mode = config.tui_mode;
+
+    if !tui_mode {
+        println!("Starting GhostGuard sidecar...");
+        println!("  RPC:        {}", config.rpc_url);
+        println!("  CLOB WS:    {}", config.clob_ws_url);
+        if !config.markets.is_empty() {
+            println!("  Markets:    {}", config.markets.join(", "));
+        }
+        if let Some(ref wh) = config.webhook_url {
+            println!("  Webhook:    {wh}");
+        }
+        if config.predictive_enabled {
+            println!(
+                "  Predictive: ENABLED (threshold={:.2}, window={})",
+                config.predictive_threshold, config.avg_window
+            );
+        }
+        if !config.verdict_log.is_empty() {
+            println!("  Verdicts:   {} (JSONL)", config.verdict_log);
+        }
+        if !config.predictive_log.is_empty() && config.predictive_enabled {
+            println!("  Warnings:   {} (JSONL)", config.predictive_log);
+        }
+        println!();
     }
-    if let Some(ref wh) = config.webhook_url {
-        println!("  Webhook:    {wh}");
-    }
-    if config.predictive_enabled {
-        println!(
-            "  Predictive: ENABLED (threshold={:.2}, window={})",
-            config.predictive_threshold, config.avg_window
-        );
-    }
-    if !config.verdict_log.is_empty() {
-        println!("  Verdicts:   {} (JSONL)", config.verdict_log);
-    }
-    if !config.predictive_log.is_empty() && config.predictive_enabled {
-        println!("  Warnings:   {} (JSONL)", config.predictive_log);
-    }
-    println!();
 
     let mut guard = GhostGuard::new(config);
 
-    guard.on_real_fill(|verdict| {
-        if let FillVerdict::Real { tx_hash, block } = verdict {
-            println!("[REAL] tx={tx_hash:?} block={block}");
-        }
-    });
+    // In TUI mode the dashboard owns the terminal — skip println callbacks
+    // so they don't corrupt the alt screen. The TUI gets events via its own
+    // internal channel.
+    if !tui_mode {
+        guard.on_real_fill(|verdict| {
+            if let FillVerdict::Real { tx_hash, block } = verdict {
+                println!("[REAL] tx={tx_hash:?} block={block}");
+            }
+        });
 
-    guard.on_ghost_fill(|event| {
-        println!(
-            "[GHOST] tx={:?} reason={} market={} side={} size={} price={}",
-            event.tx_hash, event.reason, event.market, event.side, event.size, event.price,
-        );
-        if let Some(cp) = event.counterparty {
-            println!("        counterparty={cp:?}");
-        }
-    });
+        guard.on_ghost_fill(|event| {
+            println!(
+                "[GHOST] tx={:?} reason={} market={} side={} size={} price={}",
+                event.tx_hash, event.reason, event.market, event.side, event.size, event.price,
+            );
+            if let Some(cp) = event.counterparty {
+                println!("        counterparty={cp:?}");
+            }
+        });
 
-    guard.on_predictive_warning(|w| {
-        println!(
-            "[WARN score={:.2}] tx={:?} market={} price_dev={:.3} size_anom={:.2}",
-            w.score, w.tx_hash, w.market, w.price_deviation, w.size_anomaly,
-        );
-    });
+        guard.on_predictive_warning(|w| {
+            println!(
+                "[WARN score={:.2}] tx={:?} market={} price_dev={:.3} size_anom={:.2}",
+                w.score, w.tx_hash, w.market, w.price_deviation, w.size_anomaly,
+            );
+        });
+    }
 
     guard.start().await?;
 

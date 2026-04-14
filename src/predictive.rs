@@ -18,10 +18,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tracing::debug;
 
 use crate::logging::JsonlWriter;
+use crate::tui::TuiEvent;
 use crate::types::PredictiveWarning;
 use crate::ws::ClobFill;
 
@@ -90,6 +91,7 @@ pub struct Predictor {
     threshold: f64,
     window_cap: usize,
     warning_log: Option<Arc<JsonlWriter>>,
+    tui_tx: Option<mpsc::UnboundedSender<TuiEvent>>,
 }
 
 impl Predictor {
@@ -99,7 +101,14 @@ impl Predictor {
             threshold,
             window_cap: window_cap.max(1),
             warning_log,
+            tui_tx: None,
         }
+    }
+
+    /// Attach a TUI event sender. Warnings will also be forwarded to it.
+    pub fn with_tui(mut self, tui_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
+        self.tui_tx = Some(tui_tx);
+        self
     }
 
     pub fn stats(&self) -> SharedStats {
@@ -203,6 +212,10 @@ impl Predictor {
             if let Err(e) = log.append(&line).await {
                 tracing::warn!(error = %e, "failed to append predictive warning log");
             }
+        }
+
+        if let Some(ref tx) = self.tui_tx {
+            let _ = tx.send(TuiEvent::Warning(warning.clone()));
         }
 
         Some(warning)

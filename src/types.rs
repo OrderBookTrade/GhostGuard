@@ -31,6 +31,10 @@ pub struct Config {
     pub verdict_log: String,
     /// Path to JSONL predictive warning log. Empty = disabled.
     pub predictive_log: String,
+
+    // ---- UI ----
+    /// Launch the ratatui dashboard instead of plain stdout output.
+    pub tui_mode: bool,
 }
 
 impl Default for Config {
@@ -47,6 +51,7 @@ impl Default for Config {
             avg_window: 50,
             verdict_log: "data/verdicts.jsonl".into(),
             predictive_log: "data/predictive_warnings.jsonl".into(),
+            tui_mode: false,
         }
     }
 }

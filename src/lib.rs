@@ -5,6 +5,7 @@ pub mod defense;
 pub mod detection;
 pub mod logging;
 pub mod predictive;
+pub mod tui;
 pub mod types;
 pub mod ws;
 
@@ -19,42 +20,12 @@ use tracing::{error, info, warn};
 
 use crate::detection::{DetectionContext, GhostCallback, VerdictCallback};
 use crate::logging::JsonlWriter;
+use crate::tui::TuiEvent;
 use crate::ws::ClobEvent;
 
 type WarningCallback = Arc<dyn Fn(PredictiveWarning) + Send + Sync>;
 
 /// Main GhostGuard SDK handle.
-///
-/// # Example
-///
-/// ```no_run
-/// use ghostguard::{Config, GhostGuard};
-///
-/// # async fn run() -> anyhow::Result<()> {
-/// let config = Config {
-///     rpc_url: "https://polygon-rpc.com".into(),
-///     clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".into(),
-///     ..Default::default()
-/// };
-///
-/// let mut guard = GhostGuard::new(config);
-///
-/// guard.on_real_fill(|verdict| {
-///     println!("Real fill: {:?}", verdict.tx_hash());
-/// });
-///
-/// guard.on_ghost_fill(|event| {
-///     eprintln!("GHOST: {} — {}", event.tx_hash, event.reason);
-/// });
-///
-/// guard.on_predictive_warning(|w| {
-///     eprintln!("[WARN {:.2}] {:?}", w.score, w.tx_hash);
-/// });
-///
-/// guard.start().await?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct GhostGuard {
     config: Config,
     on_real: Vec<VerdictCallback>,
@@ -72,7 +43,6 @@ impl GhostGuard {
         }
     }
 
-    /// Register a callback for confirmed real fills.
     pub fn on_real_fill<F>(&mut self, f: F)
     where
         F: Fn(FillVerdict) + Send + Sync + 'static,
@@ -80,7 +50,6 @@ impl GhostGuard {
         self.on_real.push(Arc::new(f));
     }
 
-    /// Register a callback for detected ghost fills.
     pub fn on_ghost_fill<F>(&mut self, f: F)
     where
         F: Fn(GhostFillEvent) + Send + Sync + 'static,
@@ -88,7 +57,6 @@ impl GhostGuard {
         self.on_ghost.push(Arc::new(f));
     }
 
-    /// Register a callback for predictive warnings (fired BEFORE chain confirmation).
     pub fn on_predictive_warning<F>(&mut self, f: F)
     where
         F: Fn(PredictiveWarning) + Send + Sync + 'static,
@@ -96,8 +64,8 @@ impl GhostGuard {
         self.on_warning.push(Arc::new(f));
     }
 
-    /// Start listening, verifying fills on-chain, and dispatching callbacks.
-    /// Returns cleanly on SIGINT (Ctrl-C).
+    /// Start the sidecar. Returns cleanly on SIGINT or (if `tui_mode`) when
+    /// the user presses `q` in the dashboard.
     pub async fn start(self) -> Result<()> {
         let (event_tx, event_rx) = mpsc::channel::<ClobEvent>(256);
 
@@ -111,7 +79,7 @@ impl GhostGuard {
 
         let config = Arc::new(self.config);
 
-        // Open JSONL loggers (skipped if the path is empty).
+        // JSONL loggers (skipped if path is empty).
         let verdict_log = JsonlWriter::maybe_open(&config.verdict_log).await?;
         let predictive_log = JsonlWriter::maybe_open(&config.predictive_log).await?;
 
@@ -122,28 +90,48 @@ impl GhostGuard {
             info!(path = ?log.path(), "predictive log opened");
         }
 
-        // Detection dispatch context (shared by all verification tasks).
+        // TUI channel (only created when tui_mode is on).
+        let (tui_tx, tui_rx) = if config.tui_mode {
+            let (tx, rx) = mpsc::unbounded_channel::<TuiEvent>();
+            // Seed the TUI with initial config metadata.
+            let _ = tx.send(TuiEvent::Config {
+                markets: config.markets.clone(),
+                rpc_url: config.rpc_url.clone(),
+            });
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
+        // Detection dispatch context.
         let det_ctx = DetectionContext {
             config: Arc::clone(&config),
             verdict_log,
             on_real: Arc::new(self.on_real),
             on_ghost: Arc::new(self.on_ghost),
+            tui_tx: tui_tx.clone(),
         };
 
-        // Predictive scorer (only used if enabled).
+        // Predictive scorer.
         let predictor = if config.predictive_enabled {
-            Some(Arc::new(Predictor::new(
+            let mut p = Predictor::new(
                 config.predictive_threshold,
                 config.avg_window,
                 predictive_log,
-            )))
+            );
+            if let Some(ref tx) = tui_tx {
+                p = p.with_tui(tx.clone());
+            }
+            Some(Arc::new(p))
         } else {
             None
         };
 
         let on_warning = Arc::new(self.on_warning);
 
-        if config.predictive_enabled {
+        if config.tui_mode {
+            info!("GhostGuard started — TUI mode");
+        } else if config.predictive_enabled {
             info!(
                 threshold = config.predictive_threshold,
                 window = config.avg_window,
@@ -153,13 +141,37 @@ impl GhostGuard {
             info!("GhostGuard started — listening for fills");
         }
 
-        // Main dispatch loop, racing Ctrl-C.
-        tokio::select! {
-            _ = run_event_loop(event_rx, det_ctx, predictor, on_warning) => {
-                info!("event loop exited (channel closed)");
+        // Spawn TUI render task if in TUI mode.
+        let tui_handle = tui_rx.map(|rx| tokio::spawn(async move { tui::run_tui(rx).await }));
+
+        // Main dispatch loop.
+        let event_loop_fut = run_event_loop(event_rx, det_ctx, predictor, on_warning, tui_tx);
+
+        // Race event loop against: TUI exit (user pressed q), ctrl-c.
+        if let Some(handle) = tui_handle {
+            tokio::select! {
+                _ = event_loop_fut => {
+                    info!("event loop exited (channel closed)");
+                }
+                res = handle => {
+                    match res {
+                        Ok(Ok(())) => info!("TUI exited cleanly"),
+                        Ok(Err(e)) => error!(error = %e, "TUI exited with error"),
+                        Err(e) => error!(error = %e, "TUI task panicked"),
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("SIGINT received, shutting down...");
+                }
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("SIGINT received, shutting down...");
+        } else {
+            tokio::select! {
+                _ = event_loop_fut => {
+                    info!("event loop exited (channel closed)");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("SIGINT received, shutting down...");
+                }
             }
         }
 
@@ -173,18 +185,36 @@ async fn run_event_loop(
     det_ctx: DetectionContext,
     predictor: Option<Arc<Predictor>>,
     on_warning: Arc<Vec<WarningCallback>>,
+    tui_tx: Option<mpsc::UnboundedSender<TuiEvent>>,
 ) {
     while let Some(event) = event_rx.recv().await {
         match event {
+            ClobEvent::Connected => {
+                if let Some(ref tx) = tui_tx {
+                    let _ = tx.send(TuiEvent::WsConnected);
+                }
+            }
+            ClobEvent::Disconnected => {
+                if let Some(ref tx) = tui_tx {
+                    let _ = tx.send(TuiEvent::WsDisconnected);
+                }
+            }
             ClobEvent::PriceUpdate(p) => {
                 if let Some(ref predictor) = predictor {
                     predictor
                         .ingest_price(&p.market, p.best_bid, p.best_ask)
                         .await;
                 }
+                if let Some(ref tx) = tui_tx {
+                    let mid = (p.best_bid + p.best_ask) / 2.0;
+                    let _ = tx.send(TuiEvent::PriceUpdate {
+                        market: p.market,
+                        mid,
+                    });
+                }
             }
             ClobEvent::Fill(fill) => {
-                // Phase 2: predictive scoring (fast, non-blocking)
+                // Phase 2: predictive scoring (fast, non-blocking).
                 if let Some(ref predictor) = predictor {
                     let predictor = Arc::clone(predictor);
                     let on_warning = Arc::clone(&on_warning);
@@ -198,7 +228,7 @@ async fn run_event_loop(
                     });
                 }
 
-                // Phase 1: on-chain verification (slow — 500ms to 10s)
+                // Phase 1: on-chain verification (slow — 500ms to 10s).
                 let det_ctx = det_ctx.clone();
                 tokio::spawn(async move {
                     detection::handle_fill(det_ctx, fill).await;
