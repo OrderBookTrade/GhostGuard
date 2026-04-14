@@ -14,6 +14,7 @@ pub use predictive::Predictor;
 pub use types::{Config, FillVerdict, GhostFillEvent, PredictiveWarning};
 
 use anyhow::Result;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -110,6 +111,7 @@ impl GhostGuard {
             on_real: Arc::new(self.on_real),
             on_ghost: Arc::new(self.on_ghost),
             tui_tx: tui_tx.clone(),
+            last_rpc_notice: Arc::new(AtomicU64::new(0)),
         };
 
         // Predictive scorer.
@@ -219,6 +221,11 @@ async fn run_event_loop(
                 }
             }
             ClobEvent::Fill(fill) => {
+                // Always surface the trade to the TUI immediately.
+                if let Some(ref tx) = tui_tx {
+                    let _ = tx.send(TuiEvent::Trade(fill.clone()));
+                }
+
                 // Phase 2: predictive scoring (fast, non-blocking).
                 if let Some(ref predictor) = predictor {
                     let predictor = Arc::clone(predictor);
@@ -234,10 +241,15 @@ async fn run_event_loop(
                 }
 
                 // Phase 1: on-chain verification (slow — 500ms to 10s).
-                let det_ctx = det_ctx.clone();
-                tokio::spawn(async move {
-                    detection::handle_fill(det_ctx, fill).await;
-                });
+                // Skip when tx_hash is zero (Polymarket's market channel does
+                // not deliver settlement tx hashes; that path comes in Phase 3
+                // via trade-history polling).
+                if !fill.tx_hash.is_zero() {
+                    let det_ctx = det_ctx.clone();
+                    tokio::spawn(async move {
+                        detection::handle_fill(det_ctx, fill).await;
+                    });
+                }
             }
         }
     }

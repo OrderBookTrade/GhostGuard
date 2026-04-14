@@ -17,7 +17,9 @@ struct Args {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Polygon JSON-RPC URL
+    /// Polygon JSON-RPC URL. Alternatives if polygon-rpc.com fails:
+    /// https://polygon.drpc.org, https://polygon.llamarpc.com,
+    /// https://rpc.ankr.com/polygon, https://polygon-bor-rpc.publicnode.com
     #[arg(long)]
     rpc: Option<String>,
 

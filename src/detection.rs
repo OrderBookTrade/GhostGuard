@@ -1,6 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use ethers::providers::{Http, Middleware, Provider, RawCall};
 use ethers::types::{Address, H256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -12,6 +13,14 @@ use crate::logging::JsonlWriter;
 use crate::tui::TuiEvent;
 use crate::types::{Config, FillVerdict, GhostFillEvent, TRANSFER_FROM_FAILED_SELECTOR};
 use crate::ws::ClobFill;
+
+/// Max consecutive RPC connection errors before verify_fill bails out.
+/// This avoids burning the whole verify_timeout when the RPC is unreachable.
+const MAX_CONSECUTIVE_RPC_ERRORS: u32 = 3;
+
+/// Minimum seconds between TUI [SYS] "RPC unreachable" messages — otherwise
+/// a broken RPC would flood the feed with one entry per fill.
+const RPC_ERROR_NOTICE_INTERVAL_SECS: u64 = 30;
 
 /// Callbacks dispatched by `handle_fill` after on-chain verification.
 pub type VerdictCallback = Arc<dyn Fn(FillVerdict) + Send + Sync>;
@@ -26,22 +35,33 @@ pub struct DetectionContext {
     pub on_ghost: Arc<Vec<GhostCallback>>,
     /// When TUI mode is enabled, verdicts are forwarded here for rendering.
     pub tui_tx: Option<mpsc::UnboundedSender<TuiEvent>>,
+    /// Unix timestamp of the last RPC-failure notice sent to the TUI.
+    /// Used to rate-limit the [SYS] "RPC unreachable" messages.
+    pub last_rpc_notice: Arc<AtomicU64>,
 }
 
 /// Verify a single fill transaction on-chain.
 ///
 /// Polls `eth_getTransactionReceipt` until:
-/// - receipt.status == 1 → `FillVerdict::Real`
-/// - receipt.status == 0 → `FillVerdict::Ghost` (parses revert reason)
-/// - timeout expires     → `FillVerdict::Timeout`
+/// - `receipt.status == 1` → `FillVerdict::Real`
+/// - `receipt.status == 0` → `FillVerdict::Ghost` (parses revert reason)
+/// - timeout expires with no receipt → `FillVerdict::Timeout`
+///
+/// If the RPC is unreachable (`MAX_CONSECUTIVE_RPC_ERRORS` in a row), returns
+/// `Err` early so the caller can distinguish "infrastructure broken" from
+/// "genuine timeout". Callers should NOT count Err results as ghosts.
 pub async fn verify_fill(rpc_url: &str, tx_hash: H256, config: &Config) -> Result<FillVerdict> {
     let provider = Provider::<Http>::try_from(rpc_url).context("failed to create RPC provider")?;
 
     let deadline = Instant::now() + config.verify_timeout;
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         if Instant::now() >= deadline {
-            warn!(?tx_hash, "verification timed out — treating as ghost");
+            warn!(
+                ?tx_hash,
+                "verification timed out — no receipt before deadline"
+            );
             return Ok(FillVerdict::Timeout { tx_hash });
         }
 
@@ -67,10 +87,25 @@ pub async fn verify_fill(rpc_url: &str, tx_hash: H256, config: &Config) -> Resul
                 });
             }
             Ok(None) => {
+                // Real response — server reachable, tx just not mined yet.
+                consecutive_errors = 0;
                 debug!(?tx_hash, "no receipt yet, polling...");
             }
             Err(e) => {
-                warn!(?tx_hash, error = %e, "RPC error during receipt poll");
+                consecutive_errors += 1;
+                let err_str = e.to_string();
+                warn!(
+                    ?tx_hash,
+                    error = %err_str,
+                    consecutive_errors,
+                    "RPC error during receipt poll"
+                );
+
+                if consecutive_errors >= MAX_CONSECUTIVE_RPC_ERRORS {
+                    return Err(anyhow!(
+                        "RPC unreachable after {consecutive_errors} consecutive errors: {err_str}"
+                    ));
+                }
             }
         }
 
@@ -235,6 +270,35 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Send a rate-limited [SYS] message to the TUI when the RPC becomes
+/// unreachable. Only fires once every `RPC_ERROR_NOTICE_INTERVAL_SECS`.
+fn maybe_notify_rpc_failure(ctx: &DetectionContext, err: &str) {
+    let tx = match &ctx.tui_tx {
+        Some(tx) => tx,
+        None => return,
+    };
+
+    let now = now_secs();
+    let last = ctx.last_rpc_notice.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < RPC_ERROR_NOTICE_INTERVAL_SECS {
+        return; // still within rate-limit window
+    }
+
+    // Try to claim the window; if someone else already did, skip.
+    if ctx
+        .last_rpc_notice
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    let short = err.chars().take(160).collect::<String>();
+    let _ = tx.send(TuiEvent::Status(format!(
+        "RPC unreachable: {short} — try --rpc https://polygon.drpc.org"
+    )));
+}
+
 /// Run the full verify → log → dispatch pipeline for a single fill.
 ///
 /// This is the orchestrator that `lib.rs` spawns per `ClobEvent::Fill`.
@@ -247,7 +311,11 @@ pub async fn handle_fill(ctx: DetectionContext, fill: ClobFill) {
     let verdict = match verify_fill(&config.rpc_url, fill.tx_hash, config).await {
         Ok(v) => v,
         Err(e) => {
+            // RPC unreachable — this is an infrastructure problem, NOT a ghost
+            // fill. Don't emit a verdict. Instead, send a rate-limited status
+            // message to the TUI so the user sees what's happening.
             error!(tx_hash = ?fill.tx_hash, error = %e, "verification failed");
+            maybe_notify_rpc_failure(&ctx, &e.to_string());
             return;
         }
     };

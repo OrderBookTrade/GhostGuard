@@ -40,7 +40,6 @@ pub struct PriceUpdate {
     pub best_ask: f64,
 }
 
-
 /// Connect to the Polymarket CLOB WebSocket and stream events.
 ///
 /// Reconnects with exponential backoff (1s → 2s → 4s → ... capped at 60s)
@@ -203,9 +202,7 @@ fn parse_single_event(v: &serde_json::Value) -> Option<ClobEvent> {
 }
 
 fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
+    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
 fn f64_field(v: &serde_json::Value, key: &str) -> Option<f64> {
