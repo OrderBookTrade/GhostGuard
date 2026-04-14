@@ -233,7 +233,7 @@ cargo run --example basic
 
 Built by Bruce — find me in [Polymarket Discord #devs](https://discord.gg/polymarket)
 
-Need help with ghost fill protection or Polymarket bot infrastructure? I do paid consulting for market makers. DM me on Discord.
+Need help with ghost fill protection or Polymarket bot infrastructure? I do consulting for market makers. DM me on Discord.
  
 ## License
 
