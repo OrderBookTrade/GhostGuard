@@ -81,8 +81,9 @@ impl GhostGuard {
         let (fill_tx, mut fill_rx) = mpsc::channel::<ClobFill>(256);
 
         let ws_url = self.config.clob_ws_url.clone();
+        let markets = self.config.markets.clone();
         let ws_handle = tokio::spawn(async move {
-            if let Err(e) = ws::listen_clob_fills(&ws_url, fill_tx).await {
+            if let Err(e) = ws::listen_clob_fills(&ws_url, &markets, fill_tx).await {
                 error!(error = %e, "CLOB websocket listener failed");
             }
         });

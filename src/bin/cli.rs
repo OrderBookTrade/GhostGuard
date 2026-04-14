@@ -36,6 +36,10 @@ struct Args {
     /// Verify a single tx hash and exit (for testing)
     #[arg(long)]
     verify_tx: Option<String>,
+
+    /// Comma-separated list of market IDs to monitor. If empty, subscribes to user channel.
+    #[arg(long, value_delimiter = ',')]
+    markets: Vec<String>,
 }
 
 #[tokio::main]
@@ -54,6 +58,7 @@ async fn main() -> Result<()> {
         verify_timeout: Duration::from_secs(args.timeout),
         poll_interval: Duration::from_millis(args.poll_ms),
         webhook_url: args.webhook.clone(),
+        markets: args.markets.clone(),
     };
 
     // Single tx verification mode

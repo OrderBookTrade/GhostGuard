@@ -47,7 +47,11 @@ impl ClobFillData {
 /// Connect to the Polymarket CLOB WebSocket and stream fill events.
 ///
 /// Sends each extracted fill into `tx`. Reconnects on disconnect.
-pub async fn listen_clob_fills(ws_url: &str, tx: mpsc::Sender<ClobFill>) -> Result<()> {
+pub async fn listen_clob_fills(
+    ws_url: &str,
+    markets: &[String],
+    tx: mpsc::Sender<ClobFill>,
+) -> Result<()> {
     loop {
         info!(url = ws_url, "connecting to CLOB websocket...");
 
@@ -56,12 +60,20 @@ pub async fn listen_clob_fills(ws_url: &str, tx: mpsc::Sender<ClobFill>) -> Resu
                 info!("CLOB websocket connected");
                 let (mut write, mut read) = ws_stream.split();
 
-                // Subscribe to the user fill channel
-                let subscribe_msg = serde_json::json!({
-                    "type": "subscribe",
-                    "channel": "user",
-                    "markets": [],
-                });
+                // Subscribe to the market fill channel if markets are provided, otherwise user channel
+                let subscribe_msg = if markets.is_empty() {
+                    serde_json::json!({
+                        "type": "subscribe",
+                        "channel": "user",
+                        "markets": [],
+                    })
+                } else {
+                    serde_json::json!({
+                        "type": "subscribe",
+                        "channel": "market",
+                        "markets": markets,
+                    })
+                };
                 if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
                     error!(error = %e, "failed to send subscribe message");
                     continue;

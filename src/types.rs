@@ -15,6 +15,8 @@ pub struct Config {
     pub poll_interval: Duration,
     /// Optional webhook URL for sidecar mode.
     pub webhook_url: Option<String>,
+    /// List of market IDs to monitor. If empty, subscribes to user channel.
+    pub markets: Vec<String>,
 }
 
 impl Default for Config {
@@ -25,6 +27,7 @@ impl Default for Config {
             verify_timeout: Duration::from_secs(10),
             poll_interval: Duration::from_millis(500),
             webhook_url: None,
+            markets: vec![],
         }
     }
 }
