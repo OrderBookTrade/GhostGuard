@@ -318,7 +318,11 @@ impl TuiState {
             } => self.on_verdict(verdict, fill, latency_ms),
             TuiEvent::Warning(w) => self.on_warning(w),
             TuiEvent::PriceUpdate { market, mid } => {
-                self.market_mut(&market).mid_price = Some(mid);
+                // Only update rows we're actively tracking. Ignore late ws
+                // ticks for already-retired cycles.
+                if let Some(row) = self.market_if_tracked(&market) {
+                    row.mid_price = Some(mid);
+                }
             }
             TuiEvent::WsConnected => self.status = ConnectionStatus::Connected,
             TuiEvent::WsDisconnected => self.status = ConnectionStatus::Disconnected,
@@ -339,10 +343,8 @@ impl TuiState {
                 self.markets_list = markets.clone();
                 self.rpc_url = rpc_url;
                 self.keep_resolved = Duration::from_secs(keep_resolved_secs);
-                for m in markets {
-                    self.markets
-                        .entry(m.clone())
-                        .or_insert_with(|| MarketRow::new(m));
+                for m in &markets {
+                    self.track_market(m);
                 }
             }
             TuiEvent::NewMarket {
@@ -370,10 +372,7 @@ impl TuiState {
                             format!("{} {}", outcome.to_uppercase(), time_window)
                         }
                     });
-                    let row = self
-                        .markets
-                        .entry(aid.clone())
-                        .or_insert_with(|| MarketRow::new(aid.clone()));
+                    let row = self.track_market(aid);
                     if label.is_some() {
                         row.label = label;
                     }
@@ -434,11 +433,14 @@ impl TuiState {
     }
 
     /// Called for every incoming trade (before any verification).
-    /// Updates the market row's rolling stats and emits a [TRADE] feed entry.
+    /// Updates the market row's rolling stats (only if tracked) and emits a
+    /// [TRADE] feed entry. Late trades for retired markets still show in the
+    /// feed but don't resurrect a panel row.
     fn on_trade(&mut self, fill: ClobFill) {
         let now = Instant::now();
-        let row = self.market_mut(&fill.market);
-        row.record_fill(fill.size, now);
+        if let Some(row) = self.market_if_tracked(&fill.market) {
+            row.record_fill(fill.size, now);
+        }
 
         let detail = format!(
             "side={} size={:.2} price={:.4}",
@@ -477,14 +479,16 @@ impl TuiState {
             FillVerdict::Real { block, .. } => (FeedKind::Real, format!("block={block}")),
             FillVerdict::Ghost { reason, .. } => {
                 self.stats.total_ghost += 1;
-                let row = self.market_mut(&fill.market);
-                row.ghost_count += 1;
+                if let Some(row) = self.market_if_tracked(&fill.market) {
+                    row.ghost_count += 1;
+                }
                 (FeedKind::Ghost, format!("tx={tx_full} reason={reason}"))
             }
             FillVerdict::Timeout { .. } => {
                 self.stats.total_ghost += 1;
-                let row = self.market_mut(&fill.market);
-                row.ghost_count += 1;
+                if let Some(row) = self.market_if_tracked(&fill.market) {
+                    row.ghost_count += 1;
+                }
                 (FeedKind::Ghost, format!("tx={tx_full} reason=timeout"))
             }
         };
@@ -1038,14 +1042,44 @@ mod tests {
     }
 
     #[test]
-    fn test_price_update_creates_market() {
+    fn test_price_update_for_untracked_market_is_dropped() {
+        // Late ws ticks for tokens we never subscribed to (or already retired)
+        // must NOT resurrect a phantom row in the Markets panel.
         let mut s = TuiState::new();
         s.ingest(TuiEvent::PriceUpdate {
-            market: "new-market".into(),
+            market: "ghost-market".into(),
             mid: 0.75,
         });
-        let m = s.markets.get("new-market").unwrap();
+        assert!(!s.markets.contains_key("ghost-market"));
+    }
+
+    #[test]
+    fn test_price_update_for_tracked_market_updates_mid() {
+        let mut s = TuiState::new();
+        // Track the market explicitly via NewMarket.
+        s.ingest(TuiEvent::NewMarket {
+            market: "0xevent".into(),
+            slug: "test-cycle".into(),
+            assets_ids: vec!["live-token".into()],
+            question: "?".into(),
+            outcomes: vec!["Up".into()],
+            time_window: "now".into(),
+        });
+        s.ingest(TuiEvent::PriceUpdate {
+            market: "live-token".into(),
+            mid: 0.75,
+        });
+        let m = s.markets.get("live-token").expect("tracked market exists");
         assert_eq!(m.mid_price, Some(0.75));
+    }
+
+    #[test]
+    fn test_trade_for_untracked_market_does_not_create_row() {
+        let mut s = TuiState::new();
+        s.ingest(TuiEvent::Trade(fill("ghost-token", 100.0)));
+        assert!(!s.markets.contains_key("ghost-token"));
+        // Feed should still record the trade for forensic visibility.
+        assert_eq!(s.feed.len(), 1);
     }
 
     #[test]
