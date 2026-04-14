@@ -3,6 +3,7 @@ pub mod callback;
 pub mod config;
 pub mod defense;
 pub mod detection;
+pub mod gamma;
 pub mod logging;
 pub mod predictive;
 pub mod tui;
@@ -75,6 +76,7 @@ impl GhostGuard {
         // Command channel: main loop → ws task (runtime subscribe/unsubscribe).
         let (cmd_tx, cmd_rx) = mpsc::channel::<ws::WsCommand>(32);
         let rotation_enabled = self.config.rotation_enabled;
+        let rotation_pattern = self.config.rotation_pattern.clone();
 
         let ws_handle = tokio::spawn(async move {
             if let Err(e) =
@@ -137,6 +139,30 @@ impl GhostGuard {
 
         let on_warning = Arc::new(self.on_warning);
 
+        // Rotation poller — queries Gamma every 30s as a fallback to WS
+        // `new_market` events. On cycle change, pushes Subscribe/Unsubscribe
+        // commands to the ws task so the subscription tracks reality even if
+        // the server never emits `new_market`. Also pushes a NewMarket event
+        // to the TUI so the header shows the current cycle.
+        let rotation_handle = if rotation_enabled {
+            let cmd_tx_clone = cmd_tx.clone();
+            let tui_tx_clone = tui_tx.clone();
+            let initial_markets = config.markets.clone();
+            let pattern = rotation_pattern.clone();
+            Some(tokio::spawn(async move {
+                run_rotation_poller(
+                    pattern,
+                    std::time::Duration::from_secs(30),
+                    cmd_tx_clone,
+                    tui_tx_clone,
+                    initial_markets,
+                )
+                .await;
+            }))
+        } else {
+            None
+        };
+
         if config.tui_mode {
             info!("GhostGuard started — TUI mode");
         } else if config.predictive_enabled {
@@ -185,6 +211,9 @@ impl GhostGuard {
         }
 
         ws_handle.abort();
+        if let Some(h) = rotation_handle {
+            h.abort();
+        }
         Ok(())
     }
 }
@@ -309,4 +338,102 @@ async fn run_event_loop(
     }
 
     warn!("event channel closed");
+}
+
+/// Periodic Gamma-API poller that drives market rotation.
+///
+/// Fires immediately on startup so the TUI header shows the current cycle
+/// without waiting 30s, then runs on a fixed interval. On each fetch:
+///
+/// - Skips if Gamma returned `None` or the fetch failed (next tick retries).
+/// - If the current cycle's asset IDs differ from what we last subscribed to,
+///   emits `Unsubscribe(old) → Subscribe(new)` WS commands AND a `NewMarket`
+///   event to the TUI so the header + feed reflect the rotation.
+///
+/// Serves as a safety net for when Polymarket's server doesn't honour
+/// `custom_feature_enabled: true` (or simply misses a `new_market` push
+/// during reconnect).
+async fn run_rotation_poller(
+    pattern: String,
+    interval: std::time::Duration,
+    cmd_tx: mpsc::Sender<ws::WsCommand>,
+    tui_tx: Option<mpsc::UnboundedSender<TuiEvent>>,
+    initial_assets: Vec<String>,
+) {
+    use tokio::time::MissedTickBehavior;
+
+    let mut current_assets: Vec<String> = initial_assets;
+    let mut current_slug = String::new();
+
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        ticker.tick().await;
+
+        let cycle = match gamma::fetch_current_cycle(&pattern).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                tracing::debug!(pattern = %pattern, "no active cycle from gamma");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "gamma fetch failed");
+                continue;
+            }
+        };
+
+        let changed = cycle.slug != current_slug || cycle.assets_ids != current_assets;
+        if !changed {
+            continue;
+        }
+
+        info!(
+            new_slug = %cycle.slug,
+            old_slug = %current_slug,
+            "rotation detected via gamma poller"
+        );
+
+        // Unsubscribe from old tokens (if any) first, then subscribe to new.
+        let to_unsub: Vec<String> = current_assets
+            .iter()
+            .filter(|a| !cycle.assets_ids.contains(a))
+            .cloned()
+            .collect();
+        let to_sub: Vec<String> = cycle
+            .assets_ids
+            .iter()
+            .filter(|a| !current_assets.contains(a))
+            .cloned()
+            .collect();
+
+        // Tell the TUI to mark the old tokens as resolved BEFORE announcing
+        // the new cycle. Without this the Markets panel would keep
+        // accumulating rows across every rotation.
+        if !to_unsub.is_empty() {
+            if let Some(ref tx) = tui_tx {
+                let _ = tx.send(TuiEvent::MarketResolved {
+                    market: current_slug.clone(),
+                    assets_ids: to_unsub.clone(),
+                });
+            }
+            let _ = cmd_tx.send(ws::WsCommand::Unsubscribe(to_unsub)).await;
+        }
+        if !to_sub.is_empty() {
+            let _ = cmd_tx.send(ws::WsCommand::Subscribe(to_sub)).await;
+        }
+
+        // Tell the TUI about the new cycle.
+        if let Some(ref tx) = tui_tx {
+            let _ = tx.send(TuiEvent::NewMarket {
+                market: cycle.condition_id.clone(),
+                slug: cycle.slug.clone(),
+                assets_ids: cycle.assets_ids.clone(),
+                question: cycle.question.clone(),
+            });
+        }
+
+        current_assets = cycle.assets_ids;
+        current_slug = cycle.slug;
+    }
 }

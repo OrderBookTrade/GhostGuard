@@ -62,7 +62,7 @@ impl Default for Config {
             tui_mode: false,
             rotation_enabled: false,
             rotation_pattern: "btc-updown-5m".into(),
-            keep_resolved_secs: 30,
+            keep_resolved_secs: 10,
         }
     }
 }

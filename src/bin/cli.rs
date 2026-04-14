@@ -172,18 +172,25 @@ async fn main() -> Result<()> {
     }
 
     // Bootstrap: when rotation is on and we have no markets configured,
-    // query Gamma for the current active rotating market and seed the
-    // initial asset_ids. This way the TUI doesn't need to wait for the
-    // next `new_market` event (up to 5 minutes away).
+    // query Gamma for the currently-active rotating cycle and seed the
+    // initial asset_ids. The `gamma` module filters by `startTime <= now <
+    // endDate` so we always pick the current cycle, not an older one that
+    // happens to have higher volume.
     if config.rotation_enabled && config.markets.is_empty() && args.verify_tx.is_none() {
-        match bootstrap_current_market(&config.rotation_pattern).await {
-            Ok(Some((slug, ids))) => {
-                eprintln!("Bootstrap: current cycle = {slug} ({} token(s))", ids.len());
-                config.markets = ids;
+        match ghostguard::gamma::fetch_current_cycle(&config.rotation_pattern).await {
+            Ok(Some(cycle)) => {
+                eprintln!(
+                    "Bootstrap: current cycle = {} ({} token(s), window {} → {})",
+                    cycle.slug,
+                    cycle.assets_ids.len(),
+                    cycle.start_time.format("%H:%M:%S"),
+                    cycle.end_date.format("%H:%M:%S")
+                );
+                config.markets = cycle.assets_ids;
             }
             Ok(None) => {
                 eprintln!(
-                    "Bootstrap: no active market found for pattern '{}'",
+                    "Bootstrap: no active cycle found for pattern '{}' — the rotation poller will retry every 30s",
                     config.rotation_pattern
                 );
             }
@@ -285,52 +292,4 @@ async fn main() -> Result<()> {
     guard.start().await?;
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Gamma API bootstrap
-// ---------------------------------------------------------------------------
-
-/// Fetch the currently-active rotating market from Polymarket's Gamma API.
-///
-/// Returns `Ok(Some((slug, asset_ids)))` for the first non-closed market whose
-/// slug starts with `pattern` (e.g. `"btc-updown-5m"`). This is the current
-/// 5-minute cycle. Returns `Ok(None)` if nothing active matches.
-///
-/// The call is bounded by a 5-second timeout; failures are non-fatal — the
-/// caller continues without initial markets and relies on the next
-/// `new_market` WS event to populate subscriptions.
-async fn bootstrap_current_market(pattern: &str) -> anyhow::Result<Option<(String, Vec<String>)>> {
-    use std::time::Duration as StdDuration;
-
-    let client = reqwest::Client::builder()
-        .timeout(StdDuration::from_secs(5))
-        .build()?;
-
-    // Ask for a healthy batch of active markets; we filter client-side so we
-    // don't depend on undocumented query params being honoured.
-    let url = "https://gamma-api.polymarket.com/markets?closed=false&active=true&limit=100&order=createdAt&ascending=false";
-    let resp = client.get(url).send().await?.error_for_status()?;
-    let markets: serde_json::Value = resp.json().await?;
-
-    let arr = markets.as_array().cloned().unwrap_or_default();
-    for m in arr {
-        let slug = m.get("slug").and_then(|s| s.as_str()).unwrap_or("");
-        if !slug.starts_with(pattern) {
-            continue;
-        }
-
-        // `clobTokenIds` in Gamma is a JSON-encoded STRING holding an array of IDs.
-        let raw = m
-            .get("clobTokenIds")
-            .and_then(|v| v.as_str())
-            .unwrap_or("[]");
-        let ids: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
-        if ids.is_empty() {
-            continue;
-        }
-        return Ok(Some((slug.to_string(), ids)));
-    }
-
-    Ok(None)
 }

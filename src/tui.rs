@@ -56,6 +56,8 @@ pub enum TuiEvent {
     Config {
         markets: Vec<String>,
         rpc_url: String,
+        /// How long to keep resolved markets visible in the Markets panel.
+        keep_resolved_secs: u64,
     },
     /// A new rotating market opened — TUI should show the new cycle and flash.
     NewMarket {
