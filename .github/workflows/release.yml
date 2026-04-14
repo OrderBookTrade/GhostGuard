@@ -92,4 +92,4 @@ jobs:
       - name: Test ghostguardup installer
         run: |
           bash ghostguardup
-          ghostguard --version
+          ~/.ghostguard/bin/ghostguard --version
