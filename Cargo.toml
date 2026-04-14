@@ -1,6 +1,6 @@
 [package]
 name = "ghostguard"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 description = "Detect ghost fills on Polymarket CLOB"
 license = "MIT"
