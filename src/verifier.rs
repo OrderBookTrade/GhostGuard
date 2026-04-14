@@ -178,12 +178,9 @@ fn extract_hex_revert_data(err: &str) -> Option<String> {
 fn decode_revert_bytes(hex_data: &str) -> Option<String> {
     // Check for known custom error selectors
     if hex_data.len() >= 8 {
-        let selector = &hex_data[..8];
+        let _selector = &hex_data[..8];
         // Common Polymarket CTF exchange errors can be matched here
-        match selector {
-            // Add known selectors as discovered
-            _ => {}
-        }
+        // Add known selectors as discovered
     }
 
     // Check if the entire revert data decodes to ASCII
