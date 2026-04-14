@@ -4,6 +4,12 @@ Rust crate + CLI tool that detects **ghost fills** on Polymarket's CLOB.
 
 A ghost fill occurs when the CLOB reports an order as filled, but the on-chain settlement transaction reverts. This costs market makers real money. GhostGuard monitors fills and verifies each one on-chain, catching ghosts in real time.
 
+## Live Dashboard
+
+![GhostGuard TUI](docs/tui-screenshot.png)
+
+Real-time terminal dashboard showing fill verification, predictive warnings, and market stats. Run with `--tui` flag.
+
 ## How it works
 
 ```
@@ -92,6 +98,15 @@ ghostguard \
 Listens to the CLOB websocket for fills, verifies each on-chain, and:
 - Logs to stdout: `[REAL]` or `[GHOST]` with tx details
 - POSTs JSON to your webhook URL on every verdict
+
+### Run with TUI dashboard
+
+```bash
+ghostguard \
+  --config ghostguard.toml \
+  --tui \
+  --predictive
+```
 
 ### Use as a library
 
@@ -213,6 +228,12 @@ cargo test -- --ignored test_known_ghost_fill
 # Run the example
 cargo run --example basic
 ```
+
+## Contact
+
+Built by Bruce — find me in [Polymarket Discord #devs](https://discord.gg/polymarket)
+
+Need help with ghost fill protection or Polymarket bot infrastructure? I do paid consulting for market makers. DM me on Discord.
  
 ## License
 
