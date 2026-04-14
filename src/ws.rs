@@ -62,10 +62,7 @@ pub async fn listen_clob_fills(ws_url: &str, tx: mpsc::Sender<ClobFill>) -> Resu
                     "channel": "user",
                     "markets": [],
                 });
-                if let Err(e) = write
-                    .send(Message::Text(subscribe_msg.to_string()))
-                    .await
-                {
+                if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
                     error!(error = %e, "failed to send subscribe message");
                     continue;
                 }
