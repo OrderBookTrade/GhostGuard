@@ -292,14 +292,14 @@ async fn run_event_loop(
                 }
             }
             ClobEvent::MarketResolved { market, assets_ids } => {
-                if rotation_enabled && !assets_ids.is_empty() {
-                    if cmd_tx
+                if rotation_enabled
+                    && !assets_ids.is_empty()
+                    && cmd_tx
                         .send(ws::WsCommand::Unsubscribe(assets_ids.clone()))
                         .await
                         .is_err()
-                    {
-                        warn!("ws command channel closed — cannot unsubscribe");
-                    }
+                {
+                    warn!("ws command channel closed — cannot unsubscribe");
                 }
                 if let Some(ref tx) = tui_tx {
                     let _ = tx.send(TuiEvent::MarketResolved { market, assets_ids });
