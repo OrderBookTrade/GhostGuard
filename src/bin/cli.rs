@@ -3,7 +3,8 @@ use clap::Parser;
 use ethers::types::H256;
 use ghostguard::config::FileConfig;
 use ghostguard::{Config, FillVerdict, GhostGuard};
-use std::path::PathBuf;
+use std::fs::{create_dir_all, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
@@ -69,19 +70,40 @@ struct Args {
     tui: bool,
 }
 
+const TUI_LOG_PATH: &str = "data/ghostguard.log";
+
+fn open_tui_log() -> Option<std::fs::File> {
+    let path = Path::new(TUI_LOG_PATH);
+    if let Some(parent) = path.parent() {
+        let _ = create_dir_all(parent);
+    }
+    OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // In TUI mode, route tracing to stderr only if the user explicitly set
-    // RUST_LOG; otherwise silence it so it doesn't corrupt the alt screen.
-    // Tracing init must happen before any async work.
-    if !args.tui || std::env::var("RUST_LOG").is_ok() {
+    // Tracing setup:
+    //  - Non-TUI mode: write to stderr at info level.
+    //  - TUI mode: route tracing to a log file (stderr would corrupt the alt
+    //    screen). Default level = info, override via RUST_LOG.
+    if args.tui {
+        if let Some(file) = open_tui_log() {
+            tracing_subscriber::fmt()
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+                )
+                .init();
+            eprintln!("TUI logs: {TUI_LOG_PATH}  (tail -f to debug)");
+        }
+    } else {
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new(if args.tui { "off" } else { "info" })),
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
             )
             .init();
     }

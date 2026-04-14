@@ -1,0 +1,6 @@
+2026-04-14T05:36:15.268320Z  INFO ghostguard::ws: connecting to CLOB websocket... url="wss://ws-subscriptions-clob.polymarket.com/ws/market"
+2026-04-14T05:36:15.268606Z  INFO ghostguard: verdict log opened path="data/verdicts.jsonl"
+2026-04-14T05:36:15.268634Z  INFO ghostguard: predictive log opened path="data/predictive_warnings.jsonl"
+2026-04-14T05:36:15.268801Z  INFO ghostguard: GhostGuard started — TUI mode
+2026-04-14T05:36:16.946884Z  INFO ghostguard::ws: CLOB websocket connected
+2026-04-14T05:37:07.488323Z  INFO ghostguard: TUI exited cleanly

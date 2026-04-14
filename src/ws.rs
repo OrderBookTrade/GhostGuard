@@ -18,6 +18,9 @@ pub enum ClobEvent {
     Connected,
     /// WebSocket disconnected (before reconnect attempt).
     Disconnected,
+    /// Human-readable status message (errors, reconnect attempts).
+    /// Forwarded to the TUI feed so the user sees what's happening.
+    Status(String),
 }
 
 /// A fill event extracted from the CLOB websocket.
@@ -130,31 +133,48 @@ pub async fn listen_clob_events(
 
     loop {
         info!(url = ws_url, "connecting to CLOB websocket...");
+        let _ = tx
+            .send(ClobEvent::Status(format!("connecting to {ws_url}")))
+            .await;
 
         match connect_async(ws_url).await {
             Ok((ws_stream, _)) => {
                 info!("CLOB websocket connected");
                 backoff_secs = 1;
                 let _ = tx.send(ClobEvent::Connected).await;
+                let _ = tx
+                    .send(ClobEvent::Status("CLOB websocket connected".into()))
+                    .await;
 
                 let (mut write, mut read) = ws_stream.split();
 
+                // Polymarket CLOB expects `assets_ids` (plural of asset) with
+                // `type = "market"` directly; no "subscribe" envelope.
                 let subscribe_msg = if markets.is_empty() {
                     serde_json::json!({
-                        "type": "subscribe",
-                        "channel": "user",
-                        "markets": [],
+                        "type": "market",
+                        "assets_ids": [],
                     })
                 } else {
                     serde_json::json!({
-                        "type": "subscribe",
-                        "channel": "market",
-                        "markets": markets,
+                        "type": "market",
+                        "assets_ids": markets,
                     })
                 };
-                if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
+                let sub_json = subscribe_msg.to_string();
+                debug!(payload = %sub_json, "sending subscribe");
+                if let Err(e) = write.send(Message::Text(sub_json.clone())).await {
                     error!(error = %e, "failed to send subscribe message");
-                    // fall through into reconnect
+                    let _ = tx
+                        .send(ClobEvent::Status(format!("subscribe send failed: {e}")))
+                        .await;
+                } else {
+                    let _ = tx
+                        .send(ClobEvent::Status(format!(
+                            "subscribed to {} asset(s)",
+                            markets.len()
+                        )))
+                        .await;
                 }
 
                 while let Some(msg_result) = read.next().await {
@@ -195,11 +215,19 @@ pub async fn listen_clob_events(
             }
             Err(e) => {
                 error!(error = %e, "failed to connect to CLOB websocket");
+                let _ = tx
+                    .send(ClobEvent::Status(format!("connect failed: {e}")))
+                    .await;
             }
         }
 
         let _ = tx.send(ClobEvent::Disconnected).await;
         warn!(backoff_secs, "reconnecting to CLOB websocket...");
+        let _ = tx
+            .send(ClobEvent::Status(format!(
+                "reconnecting in {backoff_secs}s..."
+            )))
+            .await;
         tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         backoff_secs = (backoff_secs * 2).min(60);
     }

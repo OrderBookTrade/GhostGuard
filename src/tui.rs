@@ -47,6 +47,8 @@ pub enum TuiEvent {
     /// WebSocket connection state changed.
     WsConnected,
     WsDisconnected,
+    /// Free-form system status message (ws errors, reconnect notices).
+    Status(String),
     /// Periodic metadata push from the main loop (e.g. markets list, rpc URL).
     Config {
         markets: Vec<String>,
@@ -86,6 +88,7 @@ pub enum FeedKind {
     Ghost,
     Warn,
     Auto,
+    System,
 }
 
 impl FeedKind {
@@ -95,6 +98,7 @@ impl FeedKind {
             FeedKind::Ghost => "[GHOST]",
             FeedKind::Warn => "[WARN]",
             FeedKind::Auto => "[AUTO]",
+            FeedKind::System => "[SYS]",
         }
     }
 
@@ -104,6 +108,7 @@ impl FeedKind {
             FeedKind::Ghost => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             FeedKind::Warn => Style::default().fg(Color::Yellow),
             FeedKind::Auto => Style::default().fg(Color::Cyan),
+            FeedKind::System => Style::default().fg(Color::Magenta),
         }
     }
 }
@@ -255,6 +260,15 @@ impl TuiState {
             }
             TuiEvent::WsConnected => self.status = ConnectionStatus::Connected,
             TuiEvent::WsDisconnected => self.status = ConnectionStatus::Disconnected,
+            TuiEvent::Status(msg) => {
+                self.push_feed(FeedEntry {
+                    time: Utc::now(),
+                    kind: FeedKind::System,
+                    tx_short: String::new(),
+                    market: String::new(),
+                    detail: msg,
+                });
+            }
             TuiEvent::Config { markets, rpc_url } => {
                 self.markets_list = markets.clone();
                 self.rpc_url = rpc_url;
@@ -543,13 +557,15 @@ fn render_feed(f: &mut Frame, area: Rect, state: &TuiState) {
         .skip(start)
         .map(|e| {
             let time = e.time.format("%H:%M:%S").to_string();
+            let tail = if matches!(e.kind, FeedKind::System) {
+                format!(" {}", e.detail)
+            } else {
+                format!(" tx=0x{}.. market={} {}", e.tx_short, e.market, e.detail)
+            };
             Line::from(vec![
                 Span::raw(format!("{time} ")),
                 Span::styled(e.kind.tag(), e.kind.style()),
-                Span::raw(format!(
-                    " tx=0x{}.. market={} {}",
-                    e.tx_short, e.market, e.detail
-                )),
+                Span::raw(tail),
             ])
         })
         .collect();

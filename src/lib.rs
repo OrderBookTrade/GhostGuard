@@ -199,6 +199,11 @@ async fn run_event_loop(
                     let _ = tx.send(TuiEvent::WsDisconnected);
                 }
             }
+            ClobEvent::Status(msg) => {
+                if let Some(ref tx) = tui_tx {
+                    let _ = tx.send(TuiEvent::Status(msg));
+                }
+            }
             ClobEvent::PriceUpdate(p) => {
                 if let Some(ref predictor) = predictor {
                     predictor
