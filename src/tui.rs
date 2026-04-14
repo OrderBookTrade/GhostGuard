@@ -312,9 +312,14 @@ impl TuiState {
                     detail: msg,
                 });
             }
-            TuiEvent::Config { markets, rpc_url } => {
+            TuiEvent::Config {
+                markets,
+                rpc_url,
+                keep_resolved_secs,
+            } => {
                 self.markets_list = markets.clone();
                 self.rpc_url = rpc_url;
+                self.keep_resolved = Duration::from_secs(keep_resolved_secs);
                 for m in markets {
                     self.markets
                         .entry(m.clone())

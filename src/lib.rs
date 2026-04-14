@@ -106,6 +106,7 @@ impl GhostGuard {
             let _ = tx.send(TuiEvent::Config {
                 markets: config.markets.clone(),
                 rpc_url: config.rpc_url.clone(),
+                keep_resolved_secs: config.keep_resolved_secs,
             });
             (Some(tx), Some(rx))
         } else {
