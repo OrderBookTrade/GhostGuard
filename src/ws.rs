@@ -20,6 +20,26 @@ pub enum ClobEvent {
     /// Human-readable status message (errors, reconnect attempts).
     /// Forwarded to the TUI feed so the user sees what's happening.
     Status(String),
+    /// A new rotating market opened (requires `custom_feature_enabled` sub).
+    NewMarket {
+        market: String,
+        assets_ids: Vec<String>,
+        question: String,
+        slug: String,
+    },
+    /// A market closed / resolved.
+    MarketResolved {
+        market: String,
+        assets_ids: Vec<String>,
+    },
+}
+
+/// Commands sent INTO the listener task from the main loop, used to
+/// dynamically subscribe/unsubscribe during market rotation.
+#[derive(Debug, Clone)]
+pub enum WsCommand {
+    Subscribe(Vec<String>),
+    Unsubscribe(Vec<String>),
 }
 
 /// A fill event extracted from the CLOB websocket.
@@ -44,12 +64,23 @@ pub struct PriceUpdate {
 ///
 /// Reconnects with exponential backoff (1s → 2s → 4s → ... capped at 60s)
 /// and resets on a successful connection.
+///
+/// `cmd_rx` accepts runtime Subscribe/Unsubscribe commands (used by the
+/// market rotation logic). The current asset-id set is kept in memory and
+/// re-applied on every reconnect so the subscription survives network blips.
+///
+/// When `rotation_enabled` is true, the initial subscribe includes
+/// `custom_feature_enabled: true, level: 3` so the server pushes
+/// `new_market` / `market_resolved` notifications.
 pub async fn listen_clob_events(
     ws_url: &str,
     markets: &[String],
     tx: mpsc::Sender<ClobEvent>,
+    mut cmd_rx: mpsc::Receiver<WsCommand>,
+    rotation_enabled: bool,
 ) -> Result<()> {
     let mut backoff_secs: u64 = 1;
+    let mut active_assets: Vec<String> = markets.to_vec();
 
     loop {
         info!(url = ws_url, "connecting to CLOB websocket...");
@@ -68,17 +99,20 @@ pub async fn listen_clob_events(
 
                 let (mut write, mut read) = ws_stream.split();
 
-                // Polymarket CLOB expects `assets_ids` (plural of asset) with
-                // `type = "market"` directly; no "subscribe" envelope.
-                let subscribe_msg = if markets.is_empty() {
+                // Initial subscribe. When rotation is enabled we ask the
+                // server for the extended feature set so `new_market` /
+                // `market_resolved` events land on our stream.
+                let subscribe_msg = if rotation_enabled {
                     serde_json::json!({
                         "type": "market",
-                        "assets_ids": [],
+                        "assets_ids": active_assets,
+                        "custom_feature_enabled": true,
+                        "level": 3,
                     })
                 } else {
                     serde_json::json!({
                         "type": "market",
-                        "assets_ids": markets,
+                        "assets_ids": active_assets,
                     })
                 };
                 let sub_json = subscribe_msg.to_string();
@@ -91,48 +125,110 @@ pub async fn listen_clob_events(
                 } else {
                     let _ = tx
                         .send(ClobEvent::Status(format!(
-                            "subscribed to {} asset(s)",
-                            markets.len()
+                            "subscribed to {} asset(s){}",
+                            active_assets.len(),
+                            if rotation_enabled {
+                                " (rotation on)"
+                            } else {
+                                ""
+                            }
                         )))
                         .await;
                 }
 
-                while let Some(msg_result) = read.next().await {
-                    match msg_result {
-                        Ok(Message::Text(text)) => {
-                            // Log every raw message at debug. Useful for
-                            // `RUST_LOG=ghostguard::ws=debug` diagnosis.
-                            debug!(len = text.len(), raw = %truncate(&text, 400), "ws msg");
+                // Inner loop: select between incoming ws messages and
+                // outgoing subscribe/unsubscribe commands.
+                let should_reconnect = loop {
+                    tokio::select! {
+                        biased;
 
-                            for event in parse_clob_message(&text) {
-                                match &event {
-                                    ClobEvent::Fill(f) => {
-                                        debug!(market = %f.market, size = f.size, price = f.price, "parsed fill");
+                        // Outgoing commands from main loop
+                        cmd = cmd_rx.recv() => {
+                            match cmd {
+                                Some(WsCommand::Subscribe(ids)) => {
+                                    for id in &ids {
+                                        if !active_assets.contains(id) {
+                                            active_assets.push(id.clone());
+                                        }
                                     }
-                                    ClobEvent::PriceUpdate(p) => {
-                                        debug!(market = %p.market, bid = p.best_bid, ask = p.best_ask, "parsed price update");
+                                    let payload = serde_json::json!({
+                                        "operation": "subscribe",
+                                        "assets_ids": ids,
+                                    })
+                                    .to_string();
+                                    debug!(payload = %payload, "sending subscribe cmd");
+                                    if let Err(e) = write.send(Message::Text(payload)).await {
+                                        error!(error = %e, "failed to send subscribe command");
+                                        break true; // reconnect
                                     }
-                                    _ => {}
                                 }
-                                if tx.send(event).await.is_err() {
-                                    info!("event channel closed, shutting down ws listener");
+                                Some(WsCommand::Unsubscribe(ids)) => {
+                                    active_assets.retain(|a| !ids.contains(a));
+                                    let payload = serde_json::json!({
+                                        "operation": "unsubscribe",
+                                        "assets_ids": ids,
+                                    })
+                                    .to_string();
+                                    debug!(payload = %payload, "sending unsubscribe cmd");
+                                    if let Err(e) = write.send(Message::Text(payload)).await {
+                                        error!(error = %e, "failed to send unsubscribe command");
+                                        break true;
+                                    }
+                                }
+                                None => {
+                                    info!("command channel closed, shutting down ws listener");
                                     return Ok(());
                                 }
                             }
                         }
-                        Ok(Message::Ping(data)) => {
-                            let _ = write.send(Message::Pong(data)).await;
+
+                        // Incoming ws messages
+                        msg = read.next() => {
+                            let Some(msg_result) = msg else { break true; };
+                            match msg_result {
+                                Ok(Message::Text(text)) => {
+                                    debug!(len = text.len(), raw = %truncate(&text, 400), "ws msg");
+                                    for event in parse_clob_message(&text) {
+                                        match &event {
+                                            ClobEvent::Fill(f) => {
+                                                debug!(market = %f.market, size = f.size, price = f.price, "parsed fill");
+                                            }
+                                            ClobEvent::PriceUpdate(p) => {
+                                                debug!(market = %p.market, bid = p.best_bid, ask = p.best_ask, "parsed price update");
+                                            }
+                                            ClobEvent::NewMarket { slug, .. } => {
+                                                info!(slug = %slug, "new market");
+                                            }
+                                            ClobEvent::MarketResolved { market, .. } => {
+                                                info!(market = %market, "market resolved");
+                                            }
+                                            _ => {}
+                                        }
+                                        if tx.send(event).await.is_err() {
+                                            info!("event channel closed, shutting down ws listener");
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                                Ok(Message::Ping(data)) => {
+                                    let _ = write.send(Message::Pong(data)).await;
+                                }
+                                Ok(Message::Close(_)) => {
+                                    warn!("CLOB websocket closed by server");
+                                    break true;
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "websocket error");
+                                    break true;
+                                }
+                                _ => {}
+                            }
                         }
-                        Ok(Message::Close(_)) => {
-                            warn!("CLOB websocket closed by server");
-                            break;
-                        }
-                        Err(e) => {
-                            error!(error = %e, "websocket error");
-                            break;
-                        }
-                        _ => {}
                     }
+                };
+
+                if !should_reconnect {
+                    return Ok(());
                 }
             }
             Err(e) => {
@@ -193,12 +289,66 @@ fn parse_single_event(v: &serde_json::Value) -> Option<ClobEvent> {
         "last_trade_price" | "trade" | "fill" | "order_fill" => {
             parse_last_trade(v).map(ClobEvent::Fill)
         }
+        "new_market" => parse_new_market(v),
+        "market_resolved" | "market_resolve" | "resolve" => parse_market_resolved(v),
         "tick_size_change" | "pong" | "heartbeat" | "" => None,
         other => {
             debug!(event_type = other, "unknown ws event type");
             None
         }
     }
+}
+
+fn parse_new_market(v: &serde_json::Value) -> Option<ClobEvent> {
+    let market = market_id(v);
+    if market.is_empty() {
+        return None;
+    }
+    let assets_ids = extract_assets_ids(v);
+    let question = str_field(v, "question").unwrap_or_default();
+    let slug = str_field(v, "slug")
+        .or_else(|| str_field(v, "market_slug"))
+        .unwrap_or_default();
+    Some(ClobEvent::NewMarket {
+        market,
+        assets_ids,
+        question,
+        slug,
+    })
+}
+
+fn parse_market_resolved(v: &serde_json::Value) -> Option<ClobEvent> {
+    let market = market_id(v);
+    if market.is_empty() {
+        return None;
+    }
+    let assets_ids = extract_assets_ids(v);
+    Some(ClobEvent::MarketResolved { market, assets_ids })
+}
+
+/// Pull the `assets_ids` / `asset_ids` / `tokens` array from a payload.
+/// Accepts both flat ["id", "id"] arrays and objects with a `token_id` field.
+fn extract_assets_ids(v: &serde_json::Value) -> Vec<String> {
+    let arr = v
+        .get("assets_ids")
+        .or_else(|| v.get("asset_ids"))
+        .or_else(|| v.get("tokens"))
+        .or_else(|| v.get("clobTokenIds"))
+        .and_then(|x| x.as_array());
+    let Some(arr) = arr else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|el| match el {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Object(obj) => obj
+                .get("token_id")
+                .or_else(|| obj.get("id"))
+                .and_then(|x| x.as_str())
+                .map(String::from),
+            _ => None,
+        })
+        .collect()
 }
 
 fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
@@ -467,6 +617,64 @@ mod tests {
     fn test_parse_unknown_event() {
         let json = r#"{"event_type": "tick_size_change", "asset_id": "m"}"#;
         assert!(parse_clob_message(json).is_empty());
+    }
+
+    #[test]
+    fn test_parse_new_market_flat() {
+        let json = r#"{
+            "event_type": "new_market",
+            "market": "0xabc",
+            "assets_ids": ["tok_a", "tok_b"],
+            "question": "BTC above $80k by 2:05pm?",
+            "slug": "btc-updown-5m-1776102300"
+        }"#;
+        match first(parse_clob_message(json)) {
+            ClobEvent::NewMarket {
+                market,
+                assets_ids,
+                question,
+                slug,
+            } => {
+                assert_eq!(market, "0xabc");
+                assert_eq!(assets_ids, vec!["tok_a".to_string(), "tok_b".to_string()]);
+                assert!(question.contains("BTC"));
+                assert_eq!(slug, "btc-updown-5m-1776102300");
+            }
+            _ => panic!("expected NewMarket"),
+        }
+    }
+
+    #[test]
+    fn test_parse_new_market_tokens_objects() {
+        // Alternate shape where tokens come as [{token_id: "..."}, ...]
+        let json = r#"{
+            "event_type": "new_market",
+            "market": "0xabc",
+            "tokens": [{"token_id": "tok_a"}, {"token_id": "tok_b"}],
+            "slug": "btc-updown-5m-1776102300"
+        }"#;
+        match first(parse_clob_message(json)) {
+            ClobEvent::NewMarket { assets_ids, .. } => {
+                assert_eq!(assets_ids, vec!["tok_a".to_string(), "tok_b".to_string()]);
+            }
+            _ => panic!("expected NewMarket"),
+        }
+    }
+
+    #[test]
+    fn test_parse_market_resolved() {
+        let json = r#"{
+            "event_type": "market_resolved",
+            "market": "0xabc",
+            "assets_ids": ["tok_a", "tok_b"]
+        }"#;
+        match first(parse_clob_message(json)) {
+            ClobEvent::MarketResolved { market, assets_ids } => {
+                assert_eq!(market, "0xabc");
+                assert_eq!(assets_ids.len(), 2);
+            }
+            _ => panic!("expected MarketResolved"),
+        }
     }
 
     #[test]

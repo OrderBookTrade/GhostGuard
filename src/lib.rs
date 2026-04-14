@@ -72,8 +72,14 @@ impl GhostGuard {
 
         let ws_url = self.config.clob_ws_url.clone();
         let markets = self.config.markets.clone();
+        // Command channel: main loop → ws task (runtime subscribe/unsubscribe).
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ws::WsCommand>(32);
+        let rotation_enabled = self.config.rotation_enabled;
+
         let ws_handle = tokio::spawn(async move {
-            if let Err(e) = ws::listen_clob_events(&ws_url, &markets, event_tx).await {
+            if let Err(e) =
+                ws::listen_clob_events(&ws_url, &markets, event_tx, cmd_rx, rotation_enabled).await
+            {
                 error!(error = %e, "CLOB websocket listener failed");
             }
         });
@@ -147,7 +153,8 @@ impl GhostGuard {
         let tui_handle = tui_rx.map(|rx| tokio::spawn(async move { tui::run_tui(rx).await }));
 
         // Main dispatch loop.
-        let event_loop_fut = run_event_loop(event_rx, det_ctx, predictor, on_warning, tui_tx);
+        let event_loop_fut =
+            run_event_loop(event_rx, det_ctx, predictor, on_warning, tui_tx, cmd_tx);
 
         // Race event loop against: TUI exit (user pressed q), ctrl-c.
         if let Some(handle) = tui_handle {
@@ -188,7 +195,10 @@ async fn run_event_loop(
     predictor: Option<Arc<Predictor>>,
     on_warning: Arc<Vec<WarningCallback>>,
     tui_tx: Option<mpsc::UnboundedSender<TuiEvent>>,
+    cmd_tx: mpsc::Sender<ws::WsCommand>,
 ) {
+    let rotation_pattern = det_ctx.config.rotation_pattern.clone();
+    let rotation_enabled = det_ctx.config.rotation_enabled;
     while let Some(event) = event_rx.recv().await {
         match event {
             ClobEvent::Connected => {
@@ -249,6 +259,50 @@ async fn run_event_loop(
                     tokio::spawn(async move {
                         detection::handle_fill(det_ctx, fill).await;
                     });
+                }
+            }
+            ClobEvent::NewMarket {
+                market,
+                assets_ids,
+                question,
+                slug,
+            } => {
+                // Only act if rotation is on AND the slug matches our pattern.
+                // Otherwise we'd end up subscribed to every new market that
+                // ever launches.
+                let matches = rotation_enabled
+                    && (rotation_pattern.is_empty() || slug.starts_with(&rotation_pattern));
+                if matches && !assets_ids.is_empty() {
+                    info!(slug = %slug, tokens = assets_ids.len(), "auto-subscribing to new cycle");
+                    if cmd_tx
+                        .send(ws::WsCommand::Subscribe(assets_ids.clone()))
+                        .await
+                        .is_err()
+                    {
+                        warn!("ws command channel closed — cannot subscribe");
+                    }
+                }
+                if let Some(ref tx) = tui_tx {
+                    let _ = tx.send(TuiEvent::NewMarket {
+                        market,
+                        slug,
+                        assets_ids,
+                        question,
+                    });
+                }
+            }
+            ClobEvent::MarketResolved { market, assets_ids } => {
+                if rotation_enabled && !assets_ids.is_empty() {
+                    if cmd_tx
+                        .send(ws::WsCommand::Unsubscribe(assets_ids.clone()))
+                        .await
+                        .is_err()
+                    {
+                        warn!("ws command channel closed — cannot unsubscribe");
+                    }
+                }
+                if let Some(ref tx) = tui_tx {
+                    let _ = tx.send(TuiEvent::MarketResolved { market, assets_ids });
                 }
             }
         }

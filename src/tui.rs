@@ -57,6 +57,18 @@ pub enum TuiEvent {
         markets: Vec<String>,
         rpc_url: String,
     },
+    /// A new rotating market opened — TUI should show the new cycle and flash.
+    NewMarket {
+        market: String,
+        slug: String,
+        assets_ids: Vec<String>,
+        question: String,
+    },
+    /// A market has been resolved — mark it [RESOLVED] and prune later.
+    MarketResolved {
+        market: String,
+        assets_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +221,15 @@ impl MarketRow {
     }
 }
 
+/// Current rotating market cycle.
+#[derive(Debug, Clone)]
+pub struct CycleInfo {
+    pub slug: String,
+    pub question: String,
+    pub assets_ids: Vec<String>,
+    pub started_at: Instant,
+}
+
 pub struct TuiState {
     pub feed: VecDeque<FeedEntry>,
     pub feed_cap: usize,
@@ -219,6 +240,15 @@ pub struct TuiState {
     pub start_time: Instant,
     pub markets_list: Vec<String>,
     pub rpc_url: String,
+    /// Currently-active rotating market cycle (if rotation is enabled).
+    pub current_cycle: Option<CycleInfo>,
+    /// Markets that have resolved, with the time they resolved. Kept in the
+    /// Markets panel for a grace period so the user can see the final state.
+    pub resolved_at: HashMap<String, Instant>,
+    /// How long to keep resolved markets visible.
+    pub keep_resolved: Duration,
+    /// Timestamp of the last NewMarket event — used to flash the header.
+    pub last_new_market_at: Option<Instant>,
 }
 
 impl TuiState {
@@ -233,6 +263,10 @@ impl TuiState {
             start_time: Instant::now(),
             markets_list: Vec::new(),
             rpc_url: String::new(),
+            current_cycle: None,
+            resolved_at: HashMap::new(),
+            keep_resolved: Duration::from_secs(30),
+            last_new_market_at: None,
         }
     }
 
@@ -285,6 +319,77 @@ impl TuiState {
                         .or_insert_with(|| MarketRow::new(m));
                 }
             }
+            TuiEvent::NewMarket {
+                market,
+                slug,
+                assets_ids,
+                question,
+            } => {
+                self.last_new_market_at = Some(Instant::now());
+                self.current_cycle = Some(CycleInfo {
+                    slug: slug.clone(),
+                    question: question.clone(),
+                    assets_ids: assets_ids.clone(),
+                    started_at: Instant::now(),
+                });
+                // Add new markets to the panel
+                for aid in &assets_ids {
+                    self.markets
+                        .entry(aid.clone())
+                        .or_insert_with(|| MarketRow::new(aid.clone()));
+                }
+                // Make sure the markets list reflects the new subscription
+                self.markets_list.retain(|m| !m.is_empty());
+                for aid in &assets_ids {
+                    if !self.markets_list.contains(aid) {
+                        self.markets_list.push(aid.clone());
+                    }
+                }
+                // Clear the resolved flag if this market is coming back
+                self.resolved_at.remove(&market);
+                for aid in &assets_ids {
+                    self.resolved_at.remove(aid);
+                }
+                self.push_feed(FeedEntry {
+                    time: Utc::now(),
+                    kind: FeedKind::System,
+                    tx_short: String::new(),
+                    market: slug.clone(),
+                    detail: format!("[NEW] {question} (tokens={})", assets_ids.len()),
+                });
+            }
+            TuiEvent::MarketResolved { market, assets_ids } => {
+                let now = Instant::now();
+                self.resolved_at.insert(market.clone(), now);
+                for aid in &assets_ids {
+                    self.resolved_at.insert(aid.clone(), now);
+                }
+                self.push_feed(FeedEntry {
+                    time: Utc::now(),
+                    kind: FeedKind::System,
+                    tx_short: String::new(),
+                    market: market.clone(),
+                    detail: format!("[RESOLVED] tokens={}", assets_ids.len()),
+                });
+            }
+        }
+    }
+
+    /// Prune markets whose resolved grace period has elapsed. Call from the
+    /// render loop on every tick.
+    pub fn prune_resolved(&mut self) {
+        let now = Instant::now();
+        let keep = self.keep_resolved;
+        let expired: Vec<String> = self
+            .resolved_at
+            .iter()
+            .filter(|(_, at)| now.duration_since(**at) > keep)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in expired {
+            self.resolved_at.remove(&key);
+            self.markets.remove(&key);
+            self.markets_list.retain(|m| m != &key);
         }
     }
 
@@ -444,6 +549,9 @@ async fn event_loop<B: ratatui::backend::Backend>(
             }
         }
 
+        // Periodic maintenance: drop resolved markets past their grace window.
+        state.prune_resolved();
+
         terminal.draw(|f| render(f, state))?;
 
         tokio::select! {
@@ -490,11 +598,15 @@ async fn poll_key() -> Result<Option<KeyCode>> {
 fn render(f: &mut Frame, state: &TuiState) {
     let size = f.area();
 
-    // Vertical split: header (3) | body (flex) | stats (5) | markets (flex) | footer (1)
+    // Header grows by 1 line when a rotating cycle is active (extra row for
+    // cycle name + countdown).
+    let header_height = if state.current_cycle.is_some() { 4 } else { 3 };
+
+    // Vertical split: header | body (flex) | stats | markets (flex) | footer
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(header_height),
             Constraint::Min(5),
             Constraint::Length(5),
             Constraint::Min(3),
@@ -510,18 +622,44 @@ fn render(f: &mut Frame, state: &TuiState) {
 }
 
 fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
-    let title_block = Block::default().borders(Borders::ALL).title(" GhostGuard ");
+    // Flash green for 2 seconds after a new market event lands.
+    let flash = state
+        .last_new_market_at
+        .map(|t| t.elapsed() < Duration::from_secs(2))
+        .unwrap_or(false);
+
+    let title_style = if flash {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let title_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" GhostGuard ", title_style));
 
     let inner = title_block.inner(area);
     f.render_widget(title_block, area);
 
+    // Build line constraints: 3 lines base, +1 if cycle is active.
+    let constraints: Vec<Constraint> = if state.current_cycle.is_some() {
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ]
+    } else {
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ]
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints(constraints)
         .split(inner);
 
     // Line 1: version + uptime
@@ -575,6 +713,35 @@ fn render_header(f: &mut Frame, area: Rect, state: &TuiState) {
         )),
         rows[2],
     );
+
+    // Line 4 (only when a cycle is active): Cycle: {slug} ({countdown})
+    if let Some(ref cycle) = state.current_cycle {
+        let remaining = seconds_until_next_5min_boundary();
+        let m = remaining / 60;
+        let s = remaining % 60;
+        let cycle_style = if flash {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("Cycle: "),
+                Span::styled(cycle.slug.clone(), cycle_style),
+                Span::raw(format!("  ({m}:{s:02} remaining)")),
+            ])),
+            rows[3],
+        );
+    }
+}
+
+/// Seconds until the next UTC 5-minute boundary (00:00, 00:05, 00:10, ...).
+fn seconds_until_next_5min_boundary() -> u64 {
+    let now = Utc::now();
+    let sec_in_bucket = (now.timestamp() as u64) % 300;
+    300 - sec_in_bucket
 }
 
 fn render_feed(f: &mut Frame, area: Rect, state: &TuiState) {
@@ -651,10 +818,16 @@ fn render_markets(f: &mut Frame, area: Rect, state: &TuiState) {
         .iter()
         .map(|m| {
             let ghost = m.ghost_rate();
-            let slug = if m.slug.len() > 20 {
-                format!("{}..", &m.slug[..18])
+            let resolved = state.resolved_at.contains_key(&m.slug);
+            let base_slug = if m.slug.len() > 18 {
+                format!("{}..", &m.slug[..16])
             } else {
                 m.slug.clone()
+            };
+            let slug = if resolved {
+                format!("{base_slug} [RESOLVED]")
+            } else {
+                base_slug
             };
             let mid = m
                 .mid_price
@@ -667,7 +840,9 @@ fn render_markets(f: &mut Frame, area: Rect, state: &TuiState) {
                 Cell::from(format!("{}", m.fills_per_min())),
                 Cell::from(format!("{ghost:.1}")),
             ]);
-            if ghost > 5.0 {
+            if resolved {
+                row = row.style(Style::default().fg(Color::DarkGray));
+            } else if ghost > 5.0 {
                 row = row.style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
             }
             row

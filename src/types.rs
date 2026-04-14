@@ -35,6 +35,14 @@ pub struct Config {
     // ---- UI ----
     /// Launch the ratatui dashboard instead of plain stdout output.
     pub tui_mode: bool,
+
+    // ---- Auto market rotation ----
+    /// Auto-follow rotating short-cycle markets (e.g. `btc-updown-5m-*`).
+    pub rotation_enabled: bool,
+    /// Market slug prefix to follow (e.g. `btc-updown-5m`).
+    pub rotation_pattern: String,
+    /// How long to keep a resolved market visible in the TUI before pruning.
+    pub keep_resolved_secs: u64,
 }
 
 impl Default for Config {
@@ -52,6 +60,9 @@ impl Default for Config {
             verdict_log: "data/verdicts.jsonl".into(),
             predictive_log: "data/predictive_warnings.jsonl".into(),
             tui_mode: false,
+            rotation_enabled: false,
+            rotation_pattern: "btc-updown-5m".into(),
+            keep_resolved_secs: 30,
         }
     }
 }

@@ -25,6 +25,8 @@ pub struct FileConfig {
     pub detection: Option<DetectionSection>,
     #[serde(default)]
     pub alerts: Option<AlertsSection>,
+    #[serde(default)]
+    pub rotation: Option<RotationSection>,
     // Phase 3 — parsed but unused in this session.
     #[serde(default)]
     pub defense: Option<DefenseSection>,
@@ -59,6 +61,13 @@ pub struct AlertsSection {
     pub webhook_url: Option<String>,
     pub verdict_log: Option<String>,
     pub predictive_log: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RotationSection {
+    pub enabled: Option<bool>,
+    pub pattern: Option<String>,
+    pub keep_resolved_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -126,6 +135,17 @@ impl FileConfig {
             }
             if let Some(p) = alerts.predictive_log {
                 base.predictive_log = p;
+            }
+        }
+        if let Some(rot) = self.rotation {
+            if let Some(b) = rot.enabled {
+                base.rotation_enabled = b;
+            }
+            if let Some(p) = rot.pattern {
+                base.rotation_pattern = p;
+            }
+            if let Some(s) = rot.keep_resolved_secs {
+                base.keep_resolved_secs = s;
             }
         }
         // defense and api sections are parsed but not wired into runtime yet.

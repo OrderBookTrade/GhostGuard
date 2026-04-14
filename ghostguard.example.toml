@@ -24,6 +24,14 @@ avg_window = 50
 verdict_log = "data/verdicts.jsonl"
 predictive_log = "data/predictive_warnings.jsonl"
 
+# Auto-follow rotating short-cycle markets (e.g. BTC 5-min up/down binary).
+# When enabled, GhostGuard bootstraps from the current active market and
+# subscribes/unsubscribes automatically on every rollover.
+[rotation]
+enabled = false
+pattern = "btc-updown-5m"        # slug prefix to follow
+keep_resolved_secs = 30          # keep resolved markets visible this long
+
 # Phase 3 — parsed but not active yet.
 [defense]
 auto_cancel = false
