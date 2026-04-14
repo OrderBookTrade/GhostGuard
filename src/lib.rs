@@ -18,7 +18,7 @@ use anyhow::Result;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::detection::{DetectionContext, GhostCallback, VerdictCallback};
 use crate::logging::JsonlWriter;
@@ -297,12 +297,23 @@ async fn run_event_loop(
                 question,
                 slug,
             } => {
-                // Only act if rotation is on AND the slug matches our pattern.
-                // Otherwise we'd end up subscribed to every new market that
-                // ever launches.
+                // Polymarket's `custom_feature_enabled` channel pushes
+                // EVERY new short-cycle market in the system (btc, eth,
+                // sol, xrp, ...). We only care about ones matching our
+                // configured pattern — drop everything else, otherwise
+                // the Markets panel fills with unrelated tokens.
                 let matches = rotation_enabled
                     && (rotation_pattern.is_empty() || slug.starts_with(&rotation_pattern));
-                if matches && !assets_ids.is_empty() {
+                if !matches {
+                    debug!(
+                        slug = %slug,
+                        pattern = %rotation_pattern,
+                        "ignoring NewMarket — pattern mismatch"
+                    );
+                    continue;
+                }
+
+                if !assets_ids.is_empty() {
                     info!(slug = %slug, tokens = assets_ids.len(), "auto-subscribing to new cycle");
                     if cmd_tx
                         .send(ws::WsCommand::Subscribe(assets_ids.clone()))
