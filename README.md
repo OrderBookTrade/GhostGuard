@@ -1,5 +1,17 @@
 # GhostGuard
 
+**A ghost fill on Polymarket costs you real money. GhostGuard catches every one within seconds of the fill.**
+
+## Who this is for
+
+You're running a maker bot on Polymarket V1 or V2. You've seen fills that make no sense — price moved wrong, size doesn't match, position tracker goes out of sync. Some of those are ghost fills. Over time they compound into serious PnL leak.
+
+GhostGuard is a detection layer you run alongside your existing bot (any language — Rust, Python, Node, Go). On every CLOB fill, it verifies the on-chain settlement. If the settlement reverted, you get an instant webhook: stop trading, cancel exposed orders, investigate.
+
+**It's a smoke alarm, not a fire extinguisher.** Real prevention requires migrating to an EIP-1271 smart contract wallet with cancel registry. GhostGuard is the detection layer you run *while* you decide whether to migrate — or permanently, as a second verification line if you do migrate.
+
+---
+
 Rust crate + CLI tool that detects **ghost fills** on Polymarket's CLOB.
 
 A ghost fill occurs when the CLOB reports an order as filled, but the on-chain settlement transaction reverts. This costs market makers real money. GhostGuard monitors fills and verifies each one on-chain, catching ghosts in real time.
@@ -229,12 +241,30 @@ cargo test -- --ignored test_known_ghost_fill
 cargo run --example basic
 ```
 
-## Contact
+## Early access for production makers
 
-Built by Bruce — find me in [Polymarket Discord #devs](https://discord.gg/polymarket)
+GhostGuard is currently in beta. I'm onboarding 3-5 production market makers for **free integration in exchange for feedback**:
 
-Need help with ghost fill protection or Polymarket bot infrastructure? I do consulting for market makers. DM me on Discord.
- 
+- 30-min setup call to wire GhostGuard into your existing bot
+- Direct DM access during beta (I debug issues with you)
+- Your ghost fill history analysis over the past 30 days
+- Pricing locks in after beta — early access makers get 50% off first year
+
+**Who this is for:** You're running a live MM bot with real capital, you've had at least one weird fill you couldn't fully explain, and you want a second pair of eyes on your settlement layer.
+
+**How to apply:** DM me on Polymarket Discord (`@Bruce`) or Telegram (`@iambaice`) with:
+
+1. Your bot's stack (language, markets, daily volume range)
+2. One example of a fill you couldn't explain
+
+I reply within 24 hours.
+
+## Paid services (post-beta)
+
+- **GhostGuard subscription**: real-time detection + webhook + dashboard. Starting at **$299/month** for single-wallet tracking.
+- **Custom integration**: I wire GhostGuard into your existing bot stack, tune alerts to your strategy. **$2,500 one-time**.
+- **Polymarket consulting**: architecture review, exploit post-mortem, V2 migration planning. **$150/hour**.
+
 ## License
 
 MIT
