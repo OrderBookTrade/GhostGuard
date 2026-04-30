@@ -80,10 +80,8 @@ struct Args {
     rotation_pattern: Option<String>,
 }
 
-const TUI_LOG_PATH: &str = "data/ghostguard.log";
-
-fn open_tui_log() -> Option<std::fs::File> {
-    let path = Path::new(TUI_LOG_PATH);
+fn open_tui_log(log_path: &str) -> Option<std::fs::File> {
+    let path = Path::new(log_path);
     if let Some(parent) = path.parent() {
         let _ = create_dir_all(parent);
     }
@@ -94,29 +92,8 @@ fn open_tui_log() -> Option<std::fs::File> {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Tracing setup:
-    //  - Non-TUI mode: write to stderr at info level.
-    //  - TUI mode: route tracing to a log file (stderr would corrupt the alt
-    //    screen). Default level = info, override via RUST_LOG.
-    if args.tui {
-        if let Some(file) = open_tui_log() {
-            tracing_subscriber::fmt()
-                .with_writer(std::sync::Mutex::new(file))
-                .with_ansi(false)
-                .with_env_filter(
-                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-                )
-                .init();
-            eprintln!("TUI logs: {TUI_LOG_PATH}  (tail -f to debug)");
-        }
-    } else {
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            )
-            .init();
-    }
+    // Build config first so we can use tui_log path for tracing setup.
+    // Tracing must be initialised before any tracing::info!() calls.
 
     // 1. Start with Config::default()
     let mut config = Config::default();
@@ -125,6 +102,31 @@ async fn main() -> Result<()> {
     if let Some(ref path) = args.config {
         let file = FileConfig::load(path).await?;
         config = file.apply_to(config);
+    }
+
+    // Tracing setup:
+    //  - Non-TUI mode: write to stderr at info level.
+    //  - TUI mode: route tracing to a log file (stderr would corrupt the alt
+    //    screen). Default level = info, override via RUST_LOG.
+    if args.tui {
+        let log_path = config.tui_log.clone();
+        if let Some(file) = open_tui_log(&log_path) {
+            tracing_subscriber::fmt()
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+                )
+                .init();
+            eprintln!("TUI logs: {log_path}  (tail -f to debug)");
+        }
+    } else {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .init();
     }
 
     // 3. Apply explicit CLI flags (they override TOML)

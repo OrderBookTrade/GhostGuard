@@ -61,6 +61,7 @@ pub struct AlertsSection {
     pub webhook_url: Option<String>,
     pub verdict_log: Option<String>,
     pub predictive_log: Option<String>,
+    pub tui_log: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -135,6 +136,9 @@ impl FileConfig {
             }
             if let Some(p) = alerts.predictive_log {
                 base.predictive_log = p;
+            }
+            if let Some(p) = alerts.tui_log {
+                base.tui_log = p;
             }
         }
         if let Some(rot) = self.rotation {

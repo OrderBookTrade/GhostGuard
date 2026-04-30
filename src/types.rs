@@ -35,6 +35,8 @@ pub struct Config {
     // ---- UI ----
     /// Launch the ratatui dashboard instead of plain stdout output.
     pub tui_mode: bool,
+    /// Path for TUI tracing log file. Empty = disabled.
+    pub tui_log: String,
 
     // ---- Auto market rotation ----
     /// Auto-follow rotating short-cycle markets (e.g. `btc-updown-5m-*`).
@@ -60,6 +62,7 @@ impl Default for Config {
             verdict_log: "data/verdicts.jsonl".into(),
             predictive_log: "data/predictive_warnings.jsonl".into(),
             tui_mode: false,
+            tui_log: "data/ghostguard.log".into(),
             rotation_enabled: false,
             rotation_pattern: "btc-updown-5m".into(),
             keep_resolved_secs: 10,
